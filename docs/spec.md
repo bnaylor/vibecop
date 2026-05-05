@@ -12,8 +12,7 @@ The daemon runs invisibly; the TUI can be attached at any time to monitor activi
 |---|---|---|
 | Language | Go 1.22+ | Single binary, easy cross-compilation |
 | CLI framework | [Cobra](https://github.com/spf13/cobra) | Subcommand structure, flag parsing |
-| TUI framework | [Bubble Tea](https://github.com/charmbracelet/bubbletea) | Elm-style model/update/view, standard Go TUI |
-| TUI components | [Lip Gloss](https://github.com/charmbracelet/lipgloss) + [Bubbles](https://github.com/charmbracelet/bubbles) | Styling and reusable components |
+| TUI framework | [tview](https://github.com/rivo/tview) | Widget tree (List, TextView, Flex), idiomatic Go, powers k9s |
 | Config format | TOML via `BurntSushi/toml` | Human-editable, widely understood |
 | IPC | Unix Domain Socket, newline-delimited JSON | No external dependencies |
 | HTTP client | `net/http` (stdlib) | Sufficient for LLM API calls |
@@ -31,7 +30,7 @@ vibecopd/
     config/       # config loading, project hash, storage paths
     hooks/        # hook script generation per harness
     audit/        # audit log writer
-    tui/          # Bubble Tea application
+    tui/          # tview application
   go.mod
   go.sum
 ```
@@ -197,7 +196,7 @@ Non-zero exit causes the coding harness to surface its own native permission pro
 
 ### TUI
 
-Built with Bubble Tea. Connects to the daemon via `tui_subscribe` and renders:
+Built with tview. Connects to the daemon via `tui_subscribe`; socket events arrive on a goroutine and update widgets via `app.QueueUpdateDraw()`. Renders:
 
 - **Header**: daemon status, active project, Guardian/Baseline mode indicator
 - **Activity feed**: scrollable list of recent verdicts — tool name, input summary, verdict badge (Approved / Escalated / Denied / Human: Approved / Human: Blocked), reason on expand, timestamp
@@ -409,6 +408,6 @@ Respects the configured `api_format`. Useful after changing endpoint or model se
 6. `vibecopd install` / `uninstall` — hook script generation and idempotent settings.json patching per harness
 7. `vibecopd init` / `refine` — subprocess invocation, stdout capture, review prompt, save flow
 8. Audit log writer, `activity.jsonl` rolling window
-9. Bubble Tea TUI — activity feed, latency panel, config summary, log tail
+9. tview TUI — activity feed, latency panel, config summary, log tail
 10. `vibecopd test` probe command
 11. End-to-end testing with Claude Code and Gemini CLI
