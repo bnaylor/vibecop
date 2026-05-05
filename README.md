@@ -130,11 +130,9 @@ vibecopd refine             Regenerate the Guardian prompt (uses recent activity
 
 ---
 
-## Why not just use Open Vibe Island?
+## Background
 
-[Open Vibe Island](https://github.com/nichochar/open-vibe-island) has a VibeCop feature that does the same thing. It's great. But it's an Electron app, which means you can't run it in locked-down corporate environments, and it requires a GUI. `vibecopd` is a single static binary with no dependencies that runs anywhere Go runs.
-
-The core AI second-opinion logic is identical. The audit log schema is compatible.
+This project grew out of experimentation with the AI second-opinion concept — the idea that a second, context-free model evaluating tool-use requests is more trustworthy than a human who's been clicking Approve for two hours. `vibecopd` is the standalone, no-GUI version: a single static binary that runs anywhere Go runs, with no Electron and no dependencies on any particular coding harness's UI.
 
 ---
 
