@@ -11,7 +11,10 @@
 - **Configuration & Storage**: Uses a global configuration directory at `~/.vibecopd/`. This directory will store:
   - Global settings (API endpoints, keys, model selections).
   - The Unix Domain Socket file.
-  - Per-project subdirectories containing `system-prompt.md`, `activity.jsonl`, and `audit/` logs.
+  - **Per-Project Guardian Storage**: Data is keyed by the SHA256 hash of the project's absolute path, stored at `~/.vibecopd/projects/<sha256>/`. Each project directory contains:
+    - `system-prompt.md`: The contextual guardian prompt.
+    - `activity.jsonl`: A rolling window of the last 10 tool-use verdicts.
+    - `audit/`: Daily historical audit records.
 
 ### 2. IPC (Inter-Process Communication)
 - **Protocol**: Newline-delimited JSON over a single Unix Domain Socket (`~/.vibecopd/daemon.sock`).
@@ -30,21 +33,24 @@
 
 ### 4. Hook Interception & Delegation (The Bridge)
 - **Hooks**: Shell/Python scripts installed directly into the coding harnesses (Gemini CLI, Claude Code, Deepseek agents).
+- **Subcommand**: `vibecopd install [--harness claude|gemini|deepseek]` — an idempotent subcommand that writes the necessary hook scripts to the correct harness configuration locations (e.g., `~/.claude/settings.json` for Claude Code).
 - **Flow**:
   1. The harness attempts to execute a tool.
   2. The installed hook intercepts the call and sends a `"type": "permission_request"` JSON payload to `~/.vibecopd/daemon.sock`.
   3. The daemon evaluates the request against its LLM configuration and returns a verdict.
-- **Fallback Semantics**:
-  - **Approve**: If the daemon returns `approve`, the hook exits `0`, silencing the prompt entirely.
-  - **Escalate / Deny / Timeout**: The hook exits with a non-zero status code and writes the VibeCop reason/context to `stderr`. The host coding harness interprets the non-zero exit and automatically surfaces its native, built-in terminal permission UI, displaying the `stderr` context to the user. This elegantly solves the GUI-less escalation problem by utilizing the host harness.
-- **Fail-Open**: If the daemon crashes, the socket is missing, or the LLM request times out, the hook instantly exits non-zero, immediately delegating the decision back to the human via the host harness.
+- **Exit Code Contract**:
+  - **Approve**: If the daemon returns `approve`, the hook exits `0` with no output, silencing the prompt entirely.
+  - **Escalate / Deny / Timeout**: The hook exits `1` (non-zero) and writes the VibeCop reason/context to `stderr`. The host coding harness interprets the non-zero exit and automatically surfaces its native, built-in terminal permission UI, displaying the `stderr` context to the user.
+- **Fail-Open**: If the daemon crashes, the socket is missing, or the LLM request times out, the hook instantly exits `1`, immediately delegating the decision back to the human via the host harness.
 
 ## AI Modes & Initialization
 
 ### Guardian Mode (Per-Project)
-- Projects are initialized by shelling out to a standard coding agent (e.g., Claude Code, Gemini CLI) using a built-in initialization prompt.
-- The agent analyzes the workspace and writes a `system-prompt.md` to the project's subdirectory within `~/.vibecopd/<project-hash>/`.
-- VibeCop uses this context to accurately evaluate routine vs. dangerous operations specific to the project's stack.
+- **Initialization Subcommand**: `vibecopd init [--harness claude|gemini|...]` — initiates project analysis by shelling out to the specified agent in non-interactive/print mode.
+- **Initialization Process**:
+  - The daemon passes a built-in initialization prompt (instructing the agent to analyze tech stack, READMEs, and expected tool patterns).
+  - The agent analyzes the workspace and prints a ready-to-use `system-prompt.md` to stdout.
+  - `vibecopd` captures this output and saves it to the project's hash directory.
 
 ### Baseline Mode (Global Fallback)
 - If a project is not initialized, VibeCop defaults to a built-in strict Baseline prompt.
@@ -52,8 +58,10 @@
 
 ## Model Support & Configuration
 - **First-Class Models**: Gemini (via `generativelanguage.googleapis.com`), Claude (via `api.anthropic.com`), and Deepseek (via Ollama or direct API).
-- **API Formats**: Native support for `OpenAI-compatible` and `Anthropic` formats.
-- **Ollama Specifics**: Disables internal chain-of-thought generation (`"think": false`) to minimize token consumption and reduce latency, treating speed as a critical priority.
+- **API Formats**: Native support for two provider shapes:
+  - **OpenAI-Compatible**: Standard format used by Ollama, Gemini, and others.
+  - **Anthropic Native**: Utilizing `x-api-key` and `anthropic-version` headers with the native Messages API shape.
+- **Ollama Specifics**: Disables internal chain-of-thought generation (`"think": false`) for CoT models (like Deepseek-R1) to minimize token consumption and reduce latency.
 
 ## Auditing & Telemetry
 - **Activity Log**: Maintains a rolling window of recent evaluations (`activity.jsonl`) fed into the context window for Guardian mode decisions.
