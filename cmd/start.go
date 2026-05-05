@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
+	"time"
 
 	"github.com/bnaylor/vibecop/internal/config"
 	"github.com/bnaylor/vibecop/internal/daemon"
+	"github.com/bnaylor/vibecop/internal/evaluator"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +27,17 @@ var startCmd = &cobra.Command{
 		socketPath := daemon.DefaultSocketPath(vibecopDir)
 
 		d := daemon.New(socketPath, cfg)
-		d.OnPermission(defaultPermissionHandler)
+
+		// Create the LLM evaluator client.
+		evalClient := evaluator.New(
+			cfg.Model.Endpoint,
+			cfg.Model.APIKey,
+			cfg.Model.APIFormat,
+			cfg.Model.Model,
+			time.Duration(cfg.Daemon.TimeoutMs)*time.Millisecond,
+		)
+
+		d.OnPermission(makePermissionHandler(evalClient, cfg.Daemon.ActivityWindow))
 
 		if err := d.Start(); err != nil {
 			return fmt.Errorf("daemon start: %w", err)
@@ -34,12 +48,41 @@ var startCmd = &cobra.Command{
 	},
 }
 
-func defaultPermissionHandler(req daemon.Request) daemon.Verdict {
-	// Placeholder — step 4 will wire the LLM evaluator here.
-	// For now, escalate everything to the human.
-	return daemon.Verdict{
-		Verdict: "escalate",
-		Reason:  "VibeCop: evaluator not yet implemented",
+func makePermissionHandler(evalClient *evaluator.Client, activityWindow int) func(daemon.Request) daemon.Verdict {
+	return func(req daemon.Request) daemon.Verdict {
+		projectHash := config.ProjectHash(req.ProjectPath)
+
+		systemPrompt, err := evaluator.ResolvePrompt(projectHash)
+		if err != nil {
+			log.Printf("evaluator: prompt resolution error: %v", err)
+			return daemon.Verdict{
+				Verdict: "escalate",
+				Reason:  "VibeCop: failed to load configuration",
+			}
+		}
+
+		// Build the tool request (activity window will be wired in step 8).
+		toolReq := evaluator.ToolRequest{
+			Tool:  req.Tool,
+			Input: req.Input,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), evalClient.Timeout())
+		defer cancel()
+
+		v, err := evalClient.Evaluate(ctx, toolReq, systemPrompt)
+		if err != nil {
+			log.Printf("evaluator: %v", err)
+			return daemon.Verdict{
+				Verdict: "escalate",
+				Reason:  "VibeCop: evaluation error — escalated",
+			}
+		}
+
+		return daemon.Verdict{
+			Verdict: v.Verdict,
+			Reason:  v.Reason,
+		}
 	}
 }
 
