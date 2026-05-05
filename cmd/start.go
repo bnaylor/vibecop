@@ -44,7 +44,7 @@ var startCmd = &cobra.Command{
 		loggers := make(map[string]*audit.Logger)
 		var storesMu sync.Mutex
 
-		d.OnPermission(makePermissionHandler(evalClient, cfg.Daemon.ActivityWindow, cfg.Daemon.AuditEnabled, stores, loggers, &storesMu))
+		d.OnPermission(makePermissionHandler(evalClient, d, cfg.Daemon.ActivityWindow, cfg.Daemon.AuditEnabled, stores, loggers, &storesMu))
 
 		if err := d.Start(); err != nil {
 			return fmt.Errorf("daemon start: %w", err)
@@ -57,6 +57,7 @@ var startCmd = &cobra.Command{
 
 func makePermissionHandler(
 	evalClient *evaluator.Client,
+	d *daemon.Daemon,
 	activityWindow int,
 	auditEnabled bool,
 	stores map[string]*audit.ActivityStore,
@@ -144,6 +145,16 @@ func makePermissionHandler(
 			}
 		}
 
+		// Emit event for TUI subscribers.
+		d.EmitEvent(daemon.Event{
+			Tool:      req.Tool,
+			Input:     req.Input,
+			Verdict:   verdictStr,
+			Reason:    reasonStr,
+			LatencyMs: latencyMs,
+			Timestamp: now.Format(time.RFC3339),
+		})
+		
 		return daemon.Verdict{
 			Verdict: verdictStr,
 			Reason:  reasonStr,
