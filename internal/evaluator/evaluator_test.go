@@ -2,6 +2,7 @@ package evaluator
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -190,6 +191,37 @@ func TestResolvePromptGuardianMode(t *testing.T) {
 	}
 	if prompt != guardianPrompt {
 		t.Errorf("expected guardian prompt, got %q", prompt)
+	}
+}
+
+func TestOpenAIRequestDoesNotInjectThinkForNonOllama(t *testing.T) {
+	// Use the request builder directly to inspect the body without an HTTP server.
+	c := New("https://api.openai.com/v1/chat/completions", "key", apiFormatOpenAI, "gpt-4o-mini", 5_000_000_000)
+	req, err := c.buildOpenAIRequest(context.Background(), ToolRequest{Tool: "Read", Input: "test"}, BaselinePrompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]any
+	json.NewDecoder(req.Body).Decode(&body)
+
+	if _, ok := body["think"]; ok {
+		t.Error("think field must not be injected for non-Ollama OpenAI requests")
+	}
+}
+
+func TestOllamaRequestInjectsThinkFalse(t *testing.T) {
+	c := New("http://localhost:11434/v1/chat/completions", "", apiFormatOpenAI, "qwen3:14b", 5_000_000_000)
+	req, err := c.buildOpenAIRequest(context.Background(), ToolRequest{Tool: "Read", Input: "test"}, BaselinePrompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]any
+	json.NewDecoder(req.Body).Decode(&body)
+
+	if v, ok := body["think"]; !ok || v != false {
+		t.Errorf("think:false must be injected for Ollama CoT requests; got %v (present=%v)", v, ok)
 	}
 }
 

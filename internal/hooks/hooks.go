@@ -97,13 +97,19 @@ func parseWithFormat(raw, harness string) (*NormalizedRequest, string, error) {
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			return nil, harness, fmt.Errorf("claude payload: %w", err)
 		}
-		if p.ToolName == "" { return nil, harness, fmt.Errorf("claude payload missing tool_name") }; return normalizeClaudeCode(p), harness, nil
+		if p.ToolName == "" {
+			return nil, harness, fmt.Errorf("claude payload missing tool_name")
+		}
+		return normalizeClaudeCode(p), harness, nil
 	case HarnessGemini:
 		var p GeminiCLIPayload
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			return nil, harness, fmt.Errorf("gemini payload: %w", err)
 		}
-		if p.Tool == "" { return nil, harness, fmt.Errorf("gemini payload missing tool") }; return normalizeGeminiCLI(p), harness, nil
+		if p.Tool == "" {
+			return nil, harness, fmt.Errorf("gemini payload missing tool")
+		}
+		return normalizeGeminiCLI(p), harness, nil
 	default:
 		return nil, harness, fmt.Errorf("unsupported harness: %s", harness)
 	}

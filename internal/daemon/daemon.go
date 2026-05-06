@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -331,7 +332,7 @@ func ReadPID(socketPath string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("read pid: %w", err)
 	}
-	pid, err := strconv.Atoi(string(data[:len(data)-1])) // strip trailing newline
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		return 0, fmt.Errorf("parse pid: %w", err)
 	}

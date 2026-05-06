@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -111,19 +112,8 @@ func (s *ActivityStore) Save() error {
 		return err
 	}
 
-	// Ensure the directory exists.
-	if err := os.MkdirAll(path[:len(path)-len("/activity.jsonl")], 0755); err != nil {
-		// Fallback: use filepath.Dir
-		dir := path
-		for i := len(path) - 1; i >= 0; i-- {
-			if path[i] == '/' {
-				dir = path[:i]
-				break
-			}
-		}
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("create activity dir: %w", err)
-		}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create activity dir: %w", err)
 	}
 
 	f, err := os.Create(path)

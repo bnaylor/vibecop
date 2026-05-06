@@ -86,7 +86,7 @@ func confirm(prompt string) bool {
 
 func init() {
 	rootCmd.AddCommand(initCmd)
-	initCmd.Flags().StringVar(&initHarness, "harness", "", "Agent to use for prompt generation (claude|gemini)")
+	initCmd.Flags().StringVar(&initHarness, "harness", "", "Agent CLI to use for prompt generation (claude|gemini, or any claude-compatible wrapper)")
 	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "Print generated prompt without saving")
 	initCmd.MarkFlagRequired("harness")
 }

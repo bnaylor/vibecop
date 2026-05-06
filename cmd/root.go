@@ -35,11 +35,10 @@ Runs in the background; attach the TUI to monitor activity.`,
 			return err
 		}
 
-		// First-run: auto-launch setup for any command that needs config.
+		// First-run: auto-launch setup for interactive commands only.
 		if cfgFile == "" {
 			if _, staterr := os.Stat(path); os.IsNotExist(staterr) {
-				name := cmd.Name()
-				if name != "setup" && name != "help" && name != "completion" {
+				if shouldTriggerSetup(cmd.Name()) {
 					fmt.Fprintf(os.Stderr, "vibecop: no configuration found\n\n")
 					if _, err := setup.Run(); err != nil {
 						return fmt.Errorf("setup: %w", err)
@@ -57,6 +56,18 @@ Runs in the background; attach the TUI to monitor activity.`,
 // Only valid after PersistentPreRunE has run.
 func VibeCopConfig() config.Config {
 	return vibecopCfg
+}
+
+// shouldTriggerSetup returns true if the named command should launch the
+// interactive setup wizard when no config file is present. Commands that
+// run non-interactively (hook is called by the harness, stop/status may be
+// called from scripts) must never block waiting for stdin.
+func shouldTriggerSetup(cmdName string) bool {
+	switch cmdName {
+	case "hook", "setup", "help", "completion", "stop", "status":
+		return false
+	}
+	return true
 }
 
 func Execute() {

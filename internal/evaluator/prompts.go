@@ -24,13 +24,18 @@ DENY immediately (these are almost always unintentional or malicious):
 - Commands that modify shell startup files (.bashrc, .zshrc, .profile, etc.)
 - Package installs that add globally visible binaries outside a known package
   manager workflow
+- Killing or signalling arbitrary processes (kill, pkill, skill) that were
+  not started by or for the current work session
 
 ESCALATE (uncertain — surface to human):
 - Any operation you cannot categorize confidently
 - Unusual combinations of file reads and outbound network activity
-- Operations on paths well outside the apparent working directory
-- Any destructive operation (delete, overwrite) on files not created in this
-  session
+- Operations on paths well outside the apparent working directory,
+  including any deletion, creation, or modification outside the project
+- Any destructive operation (delete, overwrite, truncate, rename, move) on
+  files outside the current project directory
+- Commands to terminate or suspend processes (kill, pkill) when the target
+  is ambiguous or the purpose is unclear
 
 APPROVE everything else automatically.
 

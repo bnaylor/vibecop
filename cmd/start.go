@@ -15,6 +15,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// evalClient is the interface the permission handler needs from the evaluator.
+type evalClient interface {
+	Evaluate(ctx context.Context, req evaluator.ToolRequest, systemPrompt string) (evaluator.Verdict, error)
+	Timeout() time.Duration
+}
+
+const maxConsecutiveFailures = 3
+
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the background daemon",
@@ -31,7 +39,7 @@ var startCmd = &cobra.Command{
 		d := daemon.New(socketPath, cfg)
 
 		// Create the LLM evaluator client.
-		evalClient := evaluator.New(
+		ec := evaluator.New(
 			cfg.Model.Endpoint,
 			cfg.Model.APIKey,
 			cfg.Model.APIFormat,
@@ -44,7 +52,7 @@ var startCmd = &cobra.Command{
 		loggers := make(map[string]*audit.Logger)
 		var storesMu sync.Mutex
 
-		d.OnPermission(makePermissionHandler(evalClient, d, cfg.Daemon.ActivityWindow, cfg.Daemon.AuditEnabled, stores, loggers, &storesMu))
+		d.OnPermission(makePermissionHandler(ec, d, cfg.Daemon.ActivityWindow, cfg.Daemon.AuditEnabled, stores, loggers, &storesMu))
 
 		if err := d.Start(); err != nil {
 			return fmt.Errorf("daemon start: %w", err)
@@ -56,7 +64,7 @@ var startCmd = &cobra.Command{
 }
 
 func makePermissionHandler(
-	evalClient *evaluator.Client,
+	ec evalClient,
 	d *daemon.Daemon,
 	activityWindow int,
 	auditEnabled bool,
@@ -64,7 +72,31 @@ func makePermissionHandler(
 	loggers map[string]*audit.Logger,
 	storesMu *sync.Mutex,
 ) func(daemon.Request) daemon.Verdict {
+	var (
+		failMu              sync.Mutex
+		consecutiveFailures int
+		suspended           bool
+	)
+
 	return func(req daemon.Request) daemon.Verdict {
+		// Fail-open if the evaluator has had too many consecutive errors.
+		failMu.Lock()
+		isSuspended := suspended
+		failMu.Unlock()
+
+		if isSuspended {
+			d.EmitEvent(daemon.Event{
+				Tool:      req.Tool,
+				Input:     req.Input,
+				Verdict:   "approve",
+				Reason:    "VibeCop suspended (pass-through)",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Level:     "warn",
+				Message:   "VibeCop suspended after repeated failures — pass-through mode",
+			})
+			return daemon.Verdict{Verdict: "approve"}
+		}
+
 		projectHash := config.ProjectHash(req.ProjectPath)
 
 		// Get or create per-project activity store and audit logger.
@@ -99,21 +131,37 @@ func makePermissionHandler(
 			RecentActivity: activityEntriesToVerdicts(recent),
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), evalClient.Timeout())
+		ctx, cancel := context.WithTimeout(context.Background(), ec.Timeout())
 		defer cancel()
 
 		startTime := time.Now()
-		v, err := evalClient.Evaluate(ctx, toolReq, systemPrompt)
+		v, evalErr := ec.Evaluate(ctx, toolReq, systemPrompt)
 		latencyMs := time.Since(startTime).Milliseconds()
 
 		verdictStr := v.Verdict
 		reasonStr := v.Reason
 		now := time.Now().UTC()
 
-		if err != nil {
-			log.Printf("evaluator: %v", err)
+		if evalErr != nil {
+			log.Printf("evaluator: %v", evalErr)
 			verdictStr = "error"
-			reasonStr = fmt.Sprintf("VibeCop: evaluation error — escalated (%v)", err)
+			reasonStr = fmt.Sprintf("VibeCop: evaluation error — escalated (%v)", evalErr)
+
+			failMu.Lock()
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				suspended = true
+				log.Printf("evaluator: %d consecutive failures — entering pass-through mode", consecutiveFailures)
+				d.EmitEvent(daemon.Event{
+					Level:   "error",
+					Message: fmt.Sprintf("VibeCop suspended after %d consecutive failures — run 'vibecop test' to resume", consecutiveFailures),
+				})
+			}
+			failMu.Unlock()
+		} else {
+			failMu.Lock()
+			consecutiveFailures = 0
+			failMu.Unlock()
 		}
 
 		// Record in activity log.
@@ -135,7 +183,6 @@ func makePermissionHandler(
 		}
 
 		if verdictStr == "escalate" || verdictStr == "error" {
-			// Store as pending — human decision arrives later.
 			if _, err := logger.WritePending(rec); err != nil {
 				log.Printf("audit: write pending error: %v", err)
 			}
@@ -154,7 +201,7 @@ func makePermissionHandler(
 			LatencyMs: latencyMs,
 			Timestamp: now.Format(time.RFC3339),
 		})
-		
+
 		return daemon.Verdict{
 			Verdict: verdictStr,
 			Reason:  reasonStr,

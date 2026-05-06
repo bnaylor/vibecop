@@ -141,7 +141,9 @@ func Run(socketPath string) error {
 		latency: &latencyStats{},
 	}
 
-	return a.runUI()
+	err = a.runUI()
+	a.Close()
+	return err
 }
 
 func (a *App) runUI() error {
@@ -241,10 +243,10 @@ func (a *App) handleEvent(evt daemon.Event) {
 	// Log-level events go to the log tail.
 	if evt.Level != "" || evt.Message != "" {
 		a.addLogLine(evt)
-		return
 	}
 
-	// Tool verdict events.
+	// Tool verdict events — always show in the activity feed even when they
+	// also carry a log level (e.g. pass-through / suspension events).
 	if evt.Tool != "" {
 		a.addActivity(evt)
 		if evt.LatencyMs > 0 {
@@ -299,11 +301,10 @@ func (a *App) addLogLine(evt daemon.Event) {
 
 	a.app.QueueUpdateDraw(func() {
 		fmt.Fprintln(a.logView, line)
-		// Trim by removing oldest lines.
-		lines := strings.Count(a.logView.GetText(true), "\n")
-		if lines > maxLogLines {
-			a.logView.Clear()
-			// Re-add last N lines — simpler to just clear when too big.
+		text := a.logView.GetText(true)
+		lineSlice := strings.Split(text, "\n")
+		if len(lineSlice) > maxLogLines+1 {
+			a.logView.SetText(strings.Join(lineSlice[len(lineSlice)-maxLogLines-1:], "\n"))
 		}
 	})
 }
@@ -337,7 +338,7 @@ func (a *App) updateLatencyDisplay() {
 	})
 }
 
-func (a *App) updateHeader(evt daemon.Event) {
+func (a *App) updateHeader(_ daemon.Event) {
 	a.app.QueueUpdateDraw(func() {
 		a.headerView.SetText(fmt.Sprintf(
 			"[green]vibecop[white] ● running  |  events: %d",

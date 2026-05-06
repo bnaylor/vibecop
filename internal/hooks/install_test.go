@@ -218,3 +218,96 @@ func TestInstallPreservesExistingSettings(t *testing.T) {
 		t.Errorf("expected 2 PreToolUse entries, got %d", len(cfg.Hooks.PreToolUse))
 	}
 }
+
+func TestInstallClaudePreservesExtraKeys(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	claudeDir := filepath.Join(tmpHome, ".claude")
+	os.MkdirAll(claudeDir, 0755)
+
+	// Write a settings file with keys our struct doesn't know about.
+	existing := `{"theme":"dark","model":"claude-opus-4-5","preferredLanguage":"en"}`
+	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(existing), 0644)
+
+	if err := InstallHooks(HarnessClaude); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["theme"] != "dark" {
+		t.Errorf("theme was lost: got %v", raw["theme"])
+	}
+	if raw["model"] != "claude-opus-4-5" {
+		t.Errorf("model was lost: got %v", raw["model"])
+	}
+	if raw["preferredLanguage"] != "en" {
+		t.Errorf("preferredLanguage was lost: got %v", raw["preferredLanguage"])
+	}
+}
+
+func TestUninstallClaudePreservesExtraKeys(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	claudeDir := filepath.Join(tmpHome, ".claude")
+	os.MkdirAll(claudeDir, 0755)
+
+	// Install first.
+	os.WriteFile(filepath.Join(claudeDir, "settings.json"),
+		[]byte(`{"theme":"dark"}`), 0644)
+	InstallHooks(HarnessClaude)
+
+	// Now uninstall.
+	if err := UninstallHooks(HarnessClaude); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["theme"] != "dark" {
+		t.Errorf("theme was lost after uninstall: got %v", raw["theme"])
+	}
+}
+
+func TestInstallGeminiPreservesExtraKeys(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	geminiDir := filepath.Join(tmpHome, ".gemini")
+	os.MkdirAll(geminiDir, 0755)
+
+	existing := `{"theme":"dark","timeout":30}`
+	os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(existing), 0644)
+
+	if err := InstallHooks(HarnessGemini); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(geminiDir, "settings.json"))
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["theme"] != "dark" {
+		t.Errorf("theme was lost: got %v", raw["theme"])
+	}
+	if raw["timeout"] != float64(30) {
+		t.Errorf("timeout was lost: got %v", raw["timeout"])
+	}
+}

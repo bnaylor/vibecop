@@ -61,10 +61,4 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 

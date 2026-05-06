@@ -45,12 +45,22 @@ type Client struct {
 	model      string
 	timeout    time.Duration
 	httpClient *http.Client
+	// ollamaCoT, when true, injects "think":false into OpenAI-format requests
+	// to suppress chain-of-thought tokens on Ollama CoT models (qwen3, deepseek-r1, etc.).
+	ollamaCoT bool
 }
 
 // Timeout returns the configured per-request timeout.
 func (c *Client) Timeout() time.Duration { return c.timeout }
 
+// isOllamaEndpoint returns true if the endpoint looks like a local Ollama instance.
+func isOllamaEndpoint(endpoint string) bool {
+	return strings.Contains(endpoint, "localhost") || strings.Contains(endpoint, "127.0.0.1")
+}
+
 // New creates an evaluator client from model configuration and timeout.
+// For OpenAI-format requests to local (Ollama) endpoints, think:false is
+// automatically injected to suppress CoT tokens on models that support it.
 func New(endpoint, apiKey, apiFormat, model string, timeout time.Duration) *Client {
 	return &Client{
 		endpoint:   endpoint,
@@ -58,9 +68,8 @@ func New(endpoint, apiKey, apiFormat, model string, timeout time.Duration) *Clie
 		apiFormat:  apiFormat,
 		model:      model,
 		timeout:    timeout,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		httpClient: &http.Client{Timeout: timeout},
+		ollamaCoT:  apiFormat == apiFormatOpenAI && isOllamaEndpoint(endpoint),
 	}
 }
 
@@ -117,8 +126,10 @@ func (c *Client) buildOpenAIRequest(ctx context.Context, treq ToolRequest, syste
 		"max_tokens": 256,
 	}
 
-	// Inject think:false for Ollama CoT models (harmless for non-CoT models).
-	body["think"] = false
+	// Inject think:false only for local Ollama endpoints — suppresses CoT tokens.
+	if c.ollamaCoT {
+		body["think"] = false
+	}
 
 	raw, err := json.Marshal(body)
 	if err != nil {

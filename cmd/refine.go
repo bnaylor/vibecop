@@ -74,6 +74,6 @@ var refineCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(refineCmd)
-	refineCmd.Flags().StringVar(&refineHarness, "harness", "", "Agent to use for prompt regeneration (claude|gemini)")
+	refineCmd.Flags().StringVar(&refineHarness, "harness", "", "Agent CLI to use for prompt regeneration (claude|gemini, or any claude-compatible wrapper)")
 	refineCmd.MarkFlagRequired("harness")
 }

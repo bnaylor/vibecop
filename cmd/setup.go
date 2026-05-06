@@ -62,8 +62,7 @@ func postSetup(configPath string) {
 
 	// Offer to test connection.
 	if confirm("Test the connection now?") {
-		// Run test logic directly (avoid cyclic ref to setupCmd).
-		testCmd.RunE(nil, nil)
+		testCmd.RunE(testCmd, nil)
 	}
 
 	fmt.Fprintln(os.Stderr)

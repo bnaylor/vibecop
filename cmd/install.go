@@ -47,6 +47,6 @@ func resolveInstallTargets() []string {
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-	installCmd.Flags().StringVar(&installHarness, "harness", "", "Harness to install into (claude|gemini)")
+	installCmd.Flags().StringVar(&installHarness, "harness", "", "Harness to install into (claude|gemini) — use 'claude' for any claude-compatible wrapper")
 	installCmd.Flags().BoolVar(&installAll, "all", false, "Install into all supported harnesses")
 }

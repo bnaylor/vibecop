@@ -73,36 +73,33 @@ func installClaudeHooks() error {
 		return err
 	}
 
-	// Load or create settings.
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
 
-	entry := claudePreToolEntry{
-		Matcher: "",
-		Hooks: []claudeHook{{
-			Type:    "command",
-			Command: "vibecop hook",
-		}},
-	}
+	raw := readRawJSON(path)
 
-	cfg := claudeSettings{}
-	existing := readJSONFile(path, &cfg)
-
-	if cfg.Hooks == nil {
-		cfg.Hooks = &claudeHooks{}
-	}
-
-	// Check if already installed.
-	for _, e := range cfg.Hooks.PreToolUse {
-		if len(e.Hooks) > 0 && e.Hooks[0].Command == "vibecop hook" {
-			return nil // already installed, idempotent
+	// Parse existing hooks from the raw map.
+	var hooks claudeHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
 		}
 	}
 
-	cfg.Hooks.PreToolUse = append(cfg.Hooks.PreToolUse, entry)
-	return writeJSONFile(path, cfg, existing)
+	// Check if already installed.
+	for _, e := range hooks.PreToolUse {
+		if len(e.Hooks) > 0 && e.Hooks[0].Command == "vibecop hook" {
+			return nil
+		}
+	}
+
+	hooks.PreToolUse = append(hooks.PreToolUse, claudePreToolEntry{
+		Matcher: "",
+		Hooks:   []claudeHook{{Type: "command", Command: "vibecop hook"}},
+	})
+	raw["hooks"] = hooks
+	return writeRawJSON(path, raw)
 }
 
 func installGeminiHooks() error {
@@ -111,24 +108,26 @@ func installGeminiHooks() error {
 		return err
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
 
-	cfg := geminiSettings{}
-	existing := readJSONFile(path, &cfg)
+	raw := readRawJSON(path)
 
-	if cfg.Hooks == nil {
-		cfg.Hooks = &geminiHooks{}
+	var hooks geminiHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
 	}
 
-	if cfg.Hooks.BeforeTool == "vibecop hook" {
-		return nil // already installed
+	if hooks.BeforeTool == "vibecop hook" {
+		return nil
 	}
 
-	cfg.Hooks.BeforeTool = "vibecop hook"
-	return writeJSONFile(path, cfg, existing)
+	hooks.BeforeTool = "vibecop hook"
+	raw["hooks"] = hooks
+	return writeRawJSON(path, raw)
 }
 
 // UninstallHooks removes vibecop hooks from the specified harness's settings.
@@ -150,33 +149,34 @@ func uninstallClaudeHooks() error {
 	}
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil // nothing to uninstall
-	}
-
-	cfg := claudeSettings{}
-	existing := readJSONFile(path, &cfg)
-
-	if cfg.Hooks == nil {
 		return nil
 	}
 
-	// Filter out vibecop hook entries.
-	filtered := slices.DeleteFunc(cfg.Hooks.PreToolUse, func(e claudePreToolEntry) bool {
+	raw := readRawJSON(path)
+
+	var hooks claudeHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
+	}
+
+	filtered := slices.DeleteFunc(hooks.PreToolUse, func(e claudePreToolEntry) bool {
 		return len(e.Hooks) > 0 && e.Hooks[0].Command == "vibecop hook"
 	})
 
-	if len(filtered) == len(cfg.Hooks.PreToolUse) {
-		return nil // nothing to remove
+	if len(filtered) == len(hooks.PreToolUse) {
+		return nil
 	}
 
 	if len(filtered) == 0 {
-		cfg.Hooks.PreToolUse = nil
-		cfg.Hooks = nil
+		delete(raw, "hooks")
 	} else {
-		cfg.Hooks.PreToolUse = filtered
+		hooks.PreToolUse = filtered
+		raw["hooks"] = hooks
 	}
 
-	return writeJSONFile(path, cfg, existing)
+	return writeRawJSON(path, raw)
 }
 
 func uninstallGeminiHooks() error {
@@ -189,40 +189,38 @@ func uninstallGeminiHooks() error {
 		return nil
 	}
 
-	cfg := geminiSettings{}
-	existing := readJSONFile(path, &cfg)
+	raw := readRawJSON(path)
 
-	if cfg.Hooks == nil || cfg.Hooks.BeforeTool != "vibecop hook" {
+	var hooks geminiHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
+	}
+
+	if hooks.BeforeTool != "vibecop hook" {
 		return nil
 	}
 
-	cfg.Hooks.BeforeTool = ""
-
-	// Clean up empty hooks.
-	if cfg.Hooks.BeforeTool == "" {
-		cfg.Hooks = nil
-	}
-
-	return writeJSONFile(path, cfg, existing)
+	delete(raw, "hooks")
+	return writeRawJSON(path, raw)
 }
 
-// readJSONFile reads a JSON file into dst. If the file doesn't exist,
-// dst is left unchanged and existingOk is false.
-func readJSONFile(path string, dst any) bool {
-	f, err := os.Open(path)
+// readRawJSON reads a JSON file as a raw map, preserving all keys.
+// Returns an empty map if the file doesn't exist or is malformed.
+func readRawJSON(path string) map[string]any {
+	raw := map[string]any{}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return raw
 	}
-	defer f.Close()
-	if err := json.NewDecoder(f).Decode(dst); err != nil {
-		return false
-	}
-	return true
+	json.Unmarshal(data, &raw) //nolint:errcheck
+	return raw
 }
 
-// writeJSONFile writes cfg to path with standard formatting.
-func writeJSONFile(path string, cfg any, _ bool) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+// writeRawJSON writes v to path with standard indentation.
+func writeRawJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
