@@ -38,6 +38,9 @@ func TestEventToLogRecordVerdict(t *testing.T) {
 	if got["vibecop.latency_ms"] != int64(312) {
 		t.Errorf("vibecop.latency_ms: %v", got["vibecop.latency_ms"])
 	}
+	if _, present := got["vibecop.input"]; present {
+		t.Errorf("vibecop.input must not be exported to OTLP — tool inputs may contain secrets; got %q", got["vibecop.input"])
+	}
 }
 
 func TestEventToLogRecordSeverity(t *testing.T) {

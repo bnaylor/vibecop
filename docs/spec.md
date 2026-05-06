@@ -446,6 +446,11 @@ SDK is never initialised — there is zero overhead in the critical path.
   fan-out. Severity is derived from the verdict (`deny`→ERROR,
   `escalate|error`→WARN, `approve`→INFO) and explicit `Level` overrides
   (e.g. the suspended pass-through warning).
+  Tool input is intentionally **not** exported to OTLP. Tool inputs (bash
+  command lines, file paths, etc.) routinely contain secrets — API keys
+  passed as flags, env-var values, file contents echoed via Bash. The
+  audit log keeps inputs locally under user control; OTLP targets are
+  external collectors with a different trust boundary.
 
 ### Multi-target export
 
