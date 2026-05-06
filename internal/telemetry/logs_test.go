@@ -38,6 +38,9 @@ func TestEventToLogRecordVerdict(t *testing.T) {
 	if got["vibecop.latency_ms"] != int64(312) {
 		t.Errorf("vibecop.latency_ms: %v", got["vibecop.latency_ms"])
 	}
+	if _, present := got["vibecop.input"]; present {
+		t.Errorf("vibecop.input must not be exported to OTLP — tool inputs may contain secrets; got %q", got["vibecop.input"])
+	}
 }
 
 func TestEventToLogRecordSeverity(t *testing.T) {
@@ -52,6 +55,7 @@ func TestEventToLogRecordSeverity(t *testing.T) {
 		{"approve verdict", daemon.Event{Verdict: "approve"}, otellog.SeverityInfo},
 		{"explicit error level", daemon.Event{Level: "error", Message: "oops"}, otellog.SeverityError},
 		{"explicit warn level", daemon.Event{Level: "warn", Message: "suspended"}, otellog.SeverityWarn},
+		{"explicit info level overrides deny", daemon.Event{Level: "info", Verdict: "deny"}, otellog.SeverityInfo},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

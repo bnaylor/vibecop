@@ -71,7 +71,13 @@ func EventToLogRecord(evt daemon.Event) otellog.Record {
 		}
 	}
 	addStr("vibecop.tool", evt.Tool)
-	addStr("vibecop.input", evt.Input)
+	// vibecop.input is intentionally NOT exported. Tool inputs are bash
+	// command lines, file paths, etc. — they routinely contain secrets
+	// (API keys passed as CLI flags, env-var values, file contents echoed
+	// via Bash). The audit log keeps inputs locally under user control;
+	// OTLP targets are external collectors with a different trust boundary.
+	// Operators who need input visibility for incident triage should use
+	// the local audit log (~/.vibecop/audit/<project>/).
 	addStr("vibecop.verdict", evt.Verdict)
 	addStr("vibecop.reason", evt.Reason)
 	if evt.LatencyMs != 0 {
@@ -87,6 +93,8 @@ func severityFor(evt daemon.Event) otellog.Severity {
 		return otellog.SeverityError
 	case "warn":
 		return otellog.SeverityWarn
+	case "info":
+		return otellog.SeverityInfo
 	}
 	switch evt.Verdict {
 	case "deny":

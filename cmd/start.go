@@ -188,6 +188,13 @@ func makePermissionHandler(
 			evalSpan.SetStatus(codes.Error, evalErr.Error())
 			evalSpan.RecordError(evalErr)
 		}
+		// End() is explicit, not deferred — the span name is
+		// "evaluator.llm_call" and its duration must reflect the LLM round
+		// trip only, not the post-eval activity-store save, audit write,
+		// EmitEvent, and metric recording that follows. A panic in Evaluate
+		// would crash the goroutine; Go's default unhandled-panic behavior
+		// kills the process, so any "leaked" span is freed by process
+		// teardown.
 		evalSpan.End()
 
 		verdictStr := v.Verdict
