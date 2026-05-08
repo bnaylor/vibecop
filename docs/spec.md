@@ -211,7 +211,7 @@ The TUI is organised as a `tview.Pages` tree with three pages — **activity** (
 - **Config summary**: active endpoint, model, timeout setting
 - **Log tail**: recent daemon log lines
 
-**Escalations page**: lists in-memory pending audit records (those with verdict `escalate` or `error` whose `humanDecision` is still `null`). Each row shows tool, truncated input, reason, and timestamp. Approving (`a`) or denying (`d`) finalises the audit record via the daemon's new `complete_pending` request, writing `humanDecision: "approved" | "blocked"` to the daily audit file. The agent's hook has already exited — this surface is a record-keeper / audit-completer, not a verdict gateway. The auto-refresh on incoming `escalate` events is debounced to ~250 ms.
+**Escalations page**: lists in-memory pending audit records (those with verdict `escalate` or `error` whose `humanDecision` is still `null`). Each row shows the project hash, tool, truncated input, reason, and timestamp. Approving (`a`) or denying (`d`) finalises the audit record via the daemon's new `complete_pending` request, writing `humanDecision: "approved" | "blocked"` to the daily audit file. The agent's hook has already exited — this surface is a record-keeper / audit-completer, not a verdict gateway. The auto-refresh on incoming `escalate` events is debounced to ~250 ms, with at most one refresh dial in flight at a time.
 
 **Help page**: full keyboard shortcut sheet, opened by `?` or `h` from any page. Any key closes it.
 

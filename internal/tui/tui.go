@@ -17,6 +17,7 @@ import (
 const maxLatencySamples = 50
 const maxActivityItems = 200
 const maxLogLines = 100
+const daemonRequestTimeout = 2 * time.Second
 
 type latencyStats struct {
 	mu      sync.Mutex
@@ -45,9 +46,9 @@ func (s *latencyStats) avg() float64 {
 	return float64(sum) / float64(len(s.samples))
 }
 
-func (s *latencyStats) min() int64  { s.mu.Lock(); defer s.mu.Unlock(); return minOf(s.samples) }
-func (s *latencyStats) max() int64  { s.mu.Lock(); defer s.mu.Unlock(); return maxOf(s.samples) }
-func (s *latencyStats) count() int  { s.mu.Lock(); defer s.mu.Unlock(); return len(s.samples) }
+func (s *latencyStats) min() int64 { s.mu.Lock(); defer s.mu.Unlock(); return minOf(s.samples) }
+func (s *latencyStats) max() int64 { s.mu.Lock(); defer s.mu.Unlock(); return maxOf(s.samples) }
+func (s *latencyStats) count() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.samples) }
 
 func minOf(vals []int64) int64 {
 	if len(vals) == 0 {
@@ -121,24 +122,25 @@ type App struct {
 	scanner    *bufio.Scanner
 	socketPath string
 
-	headerView    *tview.TextView
-	activity      *tview.List
-	latencyView   *tview.TextView
-	configView    *tview.TextView
-	logView       *tview.TextView
-	escalations   *tview.List
-	escalEmpty    *tview.TextView
-	helpView      *tview.TextView
-	statusBar     *tview.TextView
-	pages         *tview.Pages
+	headerView  *tview.TextView
+	activity    *tview.List
+	latencyView *tview.TextView
+	configView  *tview.TextView
+	logView     *tview.TextView
+	escalations *tview.List
+	escalEmpty  *tview.TextView
+	helpView    *tview.TextView
+	statusBar   *tview.TextView
+	pages       *tview.Pages
 
-	// Snapshot of pending escalations indexed by selectable index in the
-	// list. Held under mu.
+	// Snapshot of the currently rendered escalation list. Accessed only on
+	// the application goroutine so it stays aligned with the visible rows.
 	pending []daemon.PendingEntry
 
 	currentPage string
 	prevPage    string
 	lastRefresh time.Time
+	refreshing  bool
 
 	latency *latencyStats
 	events  int
@@ -332,7 +334,7 @@ func (a *App) globalInput(event *tcell.EventKey) *tcell.EventKey {
 		}
 	case 'R':
 		if a.currentPage == pageEscalations {
-			a.refreshEscalations()
+			a.requestEscalationRefresh(true)
 			return nil
 		}
 	}
@@ -369,9 +371,7 @@ func (a *App) switchTo(name string) {
 	a.currentPage = name
 	a.pages.SwitchToPage(name)
 	if name == pageEscalations {
-		// Trigger a refresh on entry (synchronous so the list is
-		// populated by the time the user sees it).
-		go a.refreshEscalations()
+		a.requestEscalationRefresh(true)
 	}
 	a.app.QueueUpdateDraw(func() {
 		a.updateStatusBar()
@@ -564,7 +564,15 @@ func (a *App) dialDaemon() (net.Conn, error) {
 	if a.socketPath == "" {
 		return nil, fmt.Errorf("no socket path configured")
 	}
-	return net.DialTimeout("unix", a.socketPath, 2*time.Second)
+	conn, err := net.DialTimeout("unix", a.socketPath, daemonRequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.SetDeadline(time.Now().Add(daemonRequestTimeout)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // fetchPending issues list_pending and returns the snapshot.
@@ -614,6 +622,8 @@ func (a *App) completePending(projectHash, key, humanDecision string) error {
 
 // refreshEscalations pulls the latest pending list and rebuilds the list view.
 func (a *App) refreshEscalations() {
+	defer a.finishEscalationRefresh()
+
 	pending, err := a.fetchPending()
 	if err != nil {
 		// Show the error in the empty banner. The list keeps whatever
@@ -624,11 +634,6 @@ func (a *App) refreshEscalations() {
 		return
 	}
 
-	a.mu.Lock()
-	a.pending = pending
-	a.lastRefresh = time.Now()
-	a.mu.Unlock()
-
 	a.app.QueueUpdateDraw(func() {
 		a.rebuildEscalationList(pending)
 	})
@@ -638,14 +643,27 @@ func (a *App) rebuildEscalationList(pending []daemon.PendingEntry) {
 	if a.escalations == nil {
 		return
 	}
+
+	prevProjectHash, prevKey := "", ""
+	current := a.escalations.GetCurrentItem()
+	if current >= 0 && current < len(a.pending) {
+		prev := a.pending[current]
+		prevProjectHash = prev.ProjectHash
+		prevKey = prev.Key
+	}
+
+	a.pending = append([]daemon.PendingEntry(nil), pending...)
 	a.escalations.Clear()
-	if len(pending) == 0 {
+	if len(a.pending) == 0 {
 		a.escalEmpty.SetText(emptyEscalations)
 		return
 	}
-	a.escalEmpty.SetText(fmt.Sprintf("[gray]%d pending — [white]a[gray]:approve  [white]d[gray]:deny", len(pending)))
-	for _, p := range pending {
+	a.escalEmpty.SetText(fmt.Sprintf("[gray]%d pending — [white]a[gray]:approve  [white]d[gray]:deny", len(a.pending)))
+	for _, p := range a.pending {
 		a.escalations.AddItem(escalationLabels(p))
+	}
+	if idx := findPendingIndex(a.pending, prevProjectHash, prevKey); idx >= 0 {
+		a.escalations.SetCurrentItem(idx)
 	}
 }
 
@@ -653,8 +671,33 @@ func (a *App) rebuildEscalationList(pending []daemon.PendingEntry) {
 // values for tview.List.AddItem. Pure for testability.
 func escalationLabels(p daemon.PendingEntry) (string, string, rune, func()) {
 	main := fmt.Sprintf("[yellow]%s[white]: %s", p.Tool, truncate(p.Input, 80))
-	secondary := fmt.Sprintf("[gray]%s  [yellow]%s[gray]  %s", p.Timestamp, strings.ToUpper(p.Verdict), truncate(p.Reason, 100))
+	secondary := fmt.Sprintf(
+		"[gray]%s  [blue]proj:%s[gray]  [yellow]%s[gray]  %s",
+		p.Timestamp,
+		shortProjectHash(p.ProjectHash),
+		strings.ToUpper(p.Verdict),
+		truncate(p.Reason, 100),
+	)
 	return main, secondary, 0, nil
+}
+
+func shortProjectHash(projectHash string) string {
+	if len(projectHash) <= 12 {
+		return projectHash
+	}
+	return projectHash[:12]
+}
+
+func findPendingIndex(pending []daemon.PendingEntry, projectHash, key string) int {
+	if projectHash == "" || key == "" {
+		return -1
+	}
+	for i, p := range pending {
+		if p.ProjectHash == projectHash && p.Key == key {
+			return i
+		}
+	}
+	return -1
 }
 
 func truncate(s string, n int) string {
@@ -674,13 +717,10 @@ func (a *App) completeSelected(humanDecision string) {
 		return
 	}
 	idx := a.escalations.GetCurrentItem()
-	a.mu.Lock()
 	if idx < 0 || idx >= len(a.pending) {
-		a.mu.Unlock()
 		return
 	}
 	target := a.pending[idx]
-	a.mu.Unlock()
 
 	go func() {
 		if err := a.completePending(target.ProjectHash, target.Key, humanDecision); err != nil {
@@ -689,7 +729,7 @@ func (a *App) completeSelected(humanDecision string) {
 			})
 			return
 		}
-		a.refreshEscalations()
+		a.requestEscalationRefresh(true)
 	}()
 }
 
@@ -700,13 +740,39 @@ func (a *App) maybeRefreshOnEvent(verdict string) {
 	if verdict != "escalate" && verdict != "error" {
 		return
 	}
-	a.mu.Lock()
-	since := time.Since(a.lastRefresh)
-	a.mu.Unlock()
-	if since < refreshDebounce {
+	a.requestEscalationRefresh(false)
+}
+
+func (a *App) requestEscalationRefresh(force bool) {
+	if !a.beginEscalationRefresh(force) {
 		return
 	}
 	go a.refreshEscalations()
+}
+
+func (a *App) beginEscalationRefresh(force bool) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.refreshing {
+		return false
+	}
+	if !force && time.Since(a.lastRefresh) < refreshDebounce {
+		return false
+	}
+
+	a.refreshing = true
+	if !force {
+		a.lastRefresh = time.Now()
+	}
+	return true
+}
+
+func (a *App) finishEscalationRefresh() {
+	a.mu.Lock()
+	a.refreshing = false
+	a.lastRefresh = time.Now()
+	a.mu.Unlock()
 }
 
 // Close shuts down the TUI and disconnects from the daemon.

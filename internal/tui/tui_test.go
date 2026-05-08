@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bnaylor/vibecop/internal/daemon"
+	"github.com/rivo/tview"
 )
 
 func TestLatencyStats(t *testing.T) {
@@ -79,7 +80,11 @@ func TestVerdictLabel(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
-	cases := []struct{ in string; n int; want string }{
+	cases := []struct {
+		in   string
+		n    int
+		want string
+	}{
 		{"", 5, ""},
 		{"abc", 5, "abc"},
 		{"abcdef", 6, "abcdef"},
@@ -97,11 +102,12 @@ func TestTruncate(t *testing.T) {
 
 func TestEscalationLabels(t *testing.T) {
 	p := daemon.PendingEntry{
-		Tool:      "Bash",
-		Input:     "rm -rf /",
-		Verdict:   "escalate",
-		Reason:    "destructive",
-		Timestamp: "2026-05-07T10:00:00Z",
+		ProjectHash: "1234567890abcdef",
+		Tool:        "Bash",
+		Input:       "rm -rf /",
+		Verdict:     "escalate",
+		Reason:      "destructive",
+		Timestamp:   "2026-05-07T10:00:00Z",
 	}
 	main, secondary, _, _ := escalationLabels(p)
 	if !strings.Contains(main, "Bash") {
@@ -112,6 +118,9 @@ func TestEscalationLabels(t *testing.T) {
 	}
 	if !strings.Contains(secondary, "ESCALATE") {
 		t.Errorf("secondary should contain uppercase verdict, got %q", secondary)
+	}
+	if !strings.Contains(secondary, "proj:1234567890ab") {
+		t.Errorf("secondary should contain shortened project hash, got %q", secondary)
 	}
 	if !strings.Contains(secondary, "destructive") {
 		t.Errorf("secondary should contain reason, got %q", secondary)
@@ -141,6 +150,43 @@ func TestHelpTextSections(t *testing.T) {
 		if !strings.Contains(got, "[white]"+key+"[gray]") {
 			t.Errorf("help text missing key %q", key)
 		}
+	}
+}
+
+func TestFindPendingIndex(t *testing.T) {
+	pending := []daemon.PendingEntry{
+		{ProjectHash: "h1", Key: "k1"},
+		{ProjectHash: "h2", Key: "k2"},
+	}
+
+	if got := findPendingIndex(pending, "h2", "k2"); got != 1 {
+		t.Fatalf("expected index 1, got %d", got)
+	}
+	if got := findPendingIndex(pending, "h3", "k3"); got != -1 {
+		t.Fatalf("expected -1 for missing entry, got %d", got)
+	}
+}
+
+func TestRebuildEscalationListPreservesSelectionByKey(t *testing.T) {
+	a := &App{
+		escalations: tview.NewList(),
+		escalEmpty:  tview.NewTextView(),
+	}
+	initial := []daemon.PendingEntry{
+		{ProjectHash: "h1", Key: "k1", Tool: "Bash", Verdict: "escalate"},
+		{ProjectHash: "h2", Key: "k2", Tool: "Read", Verdict: "error"},
+	}
+	a.rebuildEscalationList(initial)
+	a.escalations.SetCurrentItem(1)
+
+	refreshed := []daemon.PendingEntry{
+		{ProjectHash: "h2", Key: "k2", Tool: "Read", Verdict: "error"},
+		{ProjectHash: "h1", Key: "k1", Tool: "Bash", Verdict: "escalate"},
+	}
+	a.rebuildEscalationList(refreshed)
+
+	if got := a.escalations.GetCurrentItem(); got != 0 {
+		t.Fatalf("expected selection to follow h2/k2 to index 0, got %d", got)
 	}
 }
 
