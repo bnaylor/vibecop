@@ -199,7 +199,11 @@ Non-zero exit causes the coding harness to surface its own native permission pro
 
 ### TUI
 
-Built with tview. Connects to the daemon via `tui_subscribe`; socket events arrive on a goroutine and update widgets via `app.QueueUpdateDraw()`. Renders:
+Built with tview. Connects to the daemon via `tui_subscribe`; socket events arrive on a goroutine and update widgets via `app.QueueUpdateDraw()`.
+
+The TUI is organised as a `tview.Pages` tree with three pages — **activity** (default), **escalations**, and **help** — sandwiched between a fixed header and a context-aware status bar.
+
+**Activity page** (default):
 
 - **Header**: daemon status, active project, Guardian/Baseline mode indicator
 - **Activity feed**: scrollable list of recent verdicts — tool name, input summary, verdict badge (Approved / Escalated / Denied / Human: Approved / Human: Blocked), reason on expand, timestamp
@@ -207,7 +211,19 @@ Built with tview. Connects to the daemon via `tui_subscribe`; socket events arri
 - **Config summary**: active endpoint, model, timeout setting
 - **Log tail**: recent daemon log lines
 
-Keyboard: `q` quit, `↑/↓` scroll activity, `enter` expand/collapse reason, `r` refresh config.
+**Escalations page**: lists in-memory pending audit records (those with verdict `escalate` or `error` whose `humanDecision` is still `null`). Each row shows tool, truncated input, reason, and timestamp. Approving (`a`) or denying (`d`) finalises the audit record via the daemon's new `complete_pending` request, writing `humanDecision: "approved" | "blocked"` to the daily audit file. The agent's hook has already exited — this surface is a record-keeper / audit-completer, not a verdict gateway. The auto-refresh on incoming `escalate` events is debounced to ~250 ms.
+
+**Help page**: full keyboard shortcut sheet, opened by `?` or `h` from any page. Any key closes it.
+
+**Status bar** (always visible): shows the current page name plus a context-aware key hint, ending with `?:help`.
+
+Keyboard:
+
+- Global: `q` quit, `?` / `h` toggle help, `e` switch to escalations, `Esc` back to activity.
+- Activity: `↑/↓` scroll, `enter` expand/collapse reason, `r` refresh config.
+- Escalations: `↑/↓` scroll, `a` approve (audit), `d` deny (audit), `R` refresh queue.
+
+The escalation queue model is **non-blocking** by design: the daemon does not hold the hook connection open while a human decides. Holding open would invert the fail-open invariant (an absent operator stalls the agent indefinitely) and conflict with the harness's own PreToolUse timeout. A blocking-hold variant could be added later as an opt-in mode.
 
 ## AI Modes
 

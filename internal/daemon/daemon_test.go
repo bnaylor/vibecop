@@ -214,3 +214,153 @@ func TestDefaultSocketPath(t *testing.T) {
 		t.Errorf("unexpected path: %s", path)
 	}
 }
+
+func TestListPending(t *testing.T) {
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
+	cfg := config.DefaultConfig()
+	d := New(socketPath, cfg)
+	d.OnListPending(func() []PendingEntry {
+		return []PendingEntry{
+			{Key: "k1", ProjectHash: "h1", Tool: "Bash", Input: "rm", Verdict: "escalate", Reason: "scary"},
+			{Key: "k2", ProjectHash: "h2", Tool: "Read", Input: "/etc/passwd", Verdict: "error"},
+		}
+	})
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(Request{Type: TypeListPending})
+	var resp PendingResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Pending) != 2 {
+		t.Fatalf("expected 2 pending, got %d", len(resp.Pending))
+	}
+	if resp.Pending[0].Key != "k1" || resp.Pending[1].Key != "k2" {
+		t.Errorf("unexpected entries: %+v", resp.Pending)
+	}
+}
+
+func TestListPendingNoHandler(t *testing.T) {
+	d, socketPath := newTestDaemon(t)
+	defer d.Stop()
+	// No OnListPending registered — should still return an empty list, not escalate.
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(Request{Type: TypeListPending})
+	var resp PendingResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Pending == nil || len(resp.Pending) != 0 {
+		t.Errorf("expected empty (non-nil) slice, got %v", resp.Pending)
+	}
+}
+
+func TestCompletePendingRoundTrip(t *testing.T) {
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
+	cfg := config.DefaultConfig()
+	d := New(socketPath, cfg)
+
+	var (
+		gotHash, gotKey, gotDecision string
+	)
+	d.OnCompletePending(func(hash, key, decision string) error {
+		gotHash, gotKey, gotDecision = hash, key, decision
+		return nil
+	})
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(Request{
+		Type:          TypeCompletePending,
+		Key:           "k1",
+		ProjectHash:   "h1",
+		HumanDecision: "approved",
+	})
+	var resp CompleteResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Errorf("expected OK, got error %q", resp.Error)
+	}
+	if gotHash != "h1" || gotKey != "k1" || gotDecision != "approved" {
+		t.Errorf("handler args mismatch: hash=%q key=%q decision=%q", gotHash, gotKey, gotDecision)
+	}
+}
+
+func TestCompletePendingMissingFields(t *testing.T) {
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
+	cfg := config.DefaultConfig()
+	d := New(socketPath, cfg)
+	d.OnCompletePending(func(hash, key, decision string) error { return nil })
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(Request{Type: TypeCompletePending, Key: "k1"})
+	var resp CompleteResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK {
+		t.Error("expected OK=false for missing fields")
+	}
+}
+
+func TestCompletePendingNoHandler(t *testing.T) {
+	d, socketPath := newTestDaemon(t)
+	defer d.Stop()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(Request{
+		Type:          TypeCompletePending,
+		Key:           "k1",
+		ProjectHash:   "h1",
+		HumanDecision: "approved",
+	})
+	var resp CompleteResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK {
+		t.Error("expected OK=false when no handler is registered")
+	}
+}

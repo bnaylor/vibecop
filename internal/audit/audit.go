@@ -22,6 +22,20 @@ type AuditRecord struct {
 	LatencyMs     *int64  `json:"latencyMs,omitempty"`
 }
 
+// PendingEscalation is a snapshot of an in-memory pending audit record,
+// suitable for sending to the TUI escalation queue. It carries the
+// project hash so the operator can finalise it via Logger.CompletePending
+// without the TUI having to know which project it came from.
+type PendingEscalation struct {
+	Key         string `json:"key"`
+	ProjectHash string `json:"projectHash"`
+	Timestamp   string `json:"timestamp"`
+	Tool        string `json:"tool"`
+	Input       string `json:"input,omitempty"`
+	Verdict     string `json:"verdict"`
+	Reason      string `json:"reason,omitempty"`
+}
+
 // Logger writes structured audit records to daily files.
 type Logger struct {
 	projectHash string
@@ -100,6 +114,35 @@ func (l *Logger) CompletePending(key string, humanDecision string) error {
 	rec.HumanDecision = &humanDecision
 	return l.Write(*rec)
 }
+
+// ListPending returns a snapshot of the in-memory pending records.
+// Each entry carries the logger's projectHash so callers can route
+// completions back via the right Logger. Returns nil when disabled.
+func (l *Logger) ListPending() []PendingEscalation {
+	if !l.enabled {
+		return nil
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	out := make([]PendingEscalation, 0, len(l.pending))
+	for key, rec := range l.pending {
+		out = append(out, PendingEscalation{
+			Key:         key,
+			ProjectHash: l.projectHash,
+			Timestamp:   rec.Timestamp,
+			Tool:        rec.ToolName,
+			Input:       rec.ToolInput,
+			Verdict:     rec.Verdict,
+			Reason:      rec.Reason,
+		})
+	}
+	return out
+}
+
+// ProjectHash returns the project hash this logger was constructed with.
+func (l *Logger) ProjectHash() string { return l.projectHash }
 
 // FlushPending writes all pending records with a default decision.
 // Called on daemon shutdown to avoid losing uncompleted records.

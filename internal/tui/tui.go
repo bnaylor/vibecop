@@ -104,17 +104,41 @@ func verdictLabel(verdict string) string {
 	}
 }
 
+// Page identifiers used with tview.Pages.
+const (
+	pageActivity     = "activity"
+	pageEscalations  = "escalations"
+	pageHelp         = "help"
+	defaultPage      = pageActivity
+	refreshDebounce  = 250 * time.Millisecond
+	emptyEscalations = "[gray](no pending escalations)"
+)
+
 // App is the tview-based TUI.
 type App struct {
-	app         *tview.Application
-	conn        net.Conn
-	scanner     *bufio.Scanner
+	app        *tview.Application
+	conn       net.Conn
+	scanner    *bufio.Scanner
+	socketPath string
 
-	headerView  *tview.TextView
-	activity    *tview.List
-	latencyView *tview.TextView
-	configView  *tview.TextView
-	logView     *tview.TextView
+	headerView    *tview.TextView
+	activity      *tview.List
+	latencyView   *tview.TextView
+	configView    *tview.TextView
+	logView       *tview.TextView
+	escalations   *tview.List
+	escalEmpty    *tview.TextView
+	helpView      *tview.TextView
+	statusBar     *tview.TextView
+	pages         *tview.Pages
+
+	// Snapshot of pending escalations indexed by selectable index in the
+	// list. Held under mu.
+	pending []daemon.PendingEntry
+
+	currentPage string
+	prevPage    string
+	lastRefresh time.Time
 
 	latency *latencyStats
 	events  int
@@ -136,9 +160,11 @@ func Run(socketPath string) error {
 	}
 
 	a := &App{
-		conn:    conn,
-		scanner: bufio.NewScanner(conn),
-		latency: &latencyStats{},
+		conn:        conn,
+		scanner:     bufio.NewScanner(conn),
+		socketPath:  socketPath,
+		latency:     &latencyStats{},
+		currentPage: defaultPage,
 	}
 
 	err = a.runUI()
@@ -149,8 +175,7 @@ func Run(socketPath string) error {
 func (a *App) runUI() error {
 	a.app = tview.NewApplication()
 
-	// Build the layout.
-	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	root := tview.NewFlex().SetDirection(tview.FlexRow)
 
 	// Header.
 	a.headerView = tview.NewTextView().
@@ -158,9 +183,37 @@ func (a *App) runUI() error {
 		SetTextAlign(tview.AlignLeft)
 	a.headerView.SetText("[green]vibecop[white] ● running  |  connect to TUI")
 	a.headerView.SetBorder(true).SetBorderPadding(0, 0, 1, 1)
-	flex.AddItem(a.headerView, 3, 0, false)
+	root.AddItem(a.headerView, 3, 0, false)
 
-	// Middle: activity + right panel.
+	// Pages — activity, escalations, help.
+	a.pages = tview.NewPages()
+	a.pages.AddPage(pageActivity, a.buildActivityPage(), true, true)
+	a.pages.AddPage(pageEscalations, a.buildEscalationsPage(), true, false)
+	a.pages.AddPage(pageHelp, a.buildHelpPage(), true, false)
+	root.AddItem(a.pages, 0, 1, true)
+
+	// Status bar (context-aware).
+	a.statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter)
+	a.statusBar.SetBorder(true).SetBorderPadding(0, 0, 1, 1)
+	root.AddItem(a.statusBar, 3, 0, false)
+	a.updateStatusBar()
+
+	// Global keyboard shortcuts. Page-specific keys are attached on the
+	// per-page primitives (escalations List handles a/d itself).
+	root.SetInputCapture(a.globalInput)
+
+	// Start reading events in background.
+	go a.readEvents()
+
+	a.app.SetRoot(root, true)
+	return a.app.Run()
+}
+
+func (a *App) buildActivityPage() tview.Primitive {
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+
 	rightPanel := tview.NewFlex().SetDirection(tview.FlexRow)
 
 	a.latencyView = tview.NewTextView().
@@ -177,8 +230,7 @@ func (a *App) runUI() error {
 	a.configView.SetText("waiting for data...")
 	rightPanel.AddItem(a.configView, 0, 1, false)
 
-	a.activity = tview.NewList().
-		ShowSecondaryText(true)
+	a.activity = tview.NewList().ShowSecondaryText(true)
 	a.activity.SetTitle("activity").SetBorder(true)
 
 	middle := tview.NewFlex().
@@ -186,7 +238,6 @@ func (a *App) runUI() error {
 		AddItem(rightPanel, 0, 2, false)
 	flex.AddItem(middle, 0, 1, true)
 
-	// Log tail.
 	a.logView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft).
@@ -194,32 +245,172 @@ func (a *App) runUI() error {
 	a.logView.SetTitle("log").SetBorder(true)
 	flex.AddItem(a.logView, 7, 0, false)
 
-	// Status bar.
-	statusBar := tview.NewTextView().
+	return flex
+}
+
+func (a *App) buildEscalationsPage() tview.Primitive {
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+
+	a.escalations = tview.NewList().ShowSecondaryText(true)
+	a.escalations.SetTitle("escalations — pending").SetBorder(true)
+	a.escalations.SetInputCapture(a.escalationsInput)
+
+	a.escalEmpty = tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignCenter)
-	statusBar.SetText("[white]q[gray]:quit  [white]↑/↓[gray]:scroll activity  [white]enter[gray]:expand reason  [white]r[gray]:refresh config")
-	statusBar.SetBorder(true).SetBorderPadding(0, 0, 1, 1)
-	flex.AddItem(statusBar, 1, 0, false)
+	a.escalEmpty.SetText(emptyEscalations)
+	a.escalEmpty.SetBorder(false)
 
-	// Keyboard shortcuts.
-	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+	flex.AddItem(a.escalations, 0, 1, true)
+	flex.AddItem(a.escalEmpty, 1, 0, false)
+	return flex
+}
+
+func (a *App) buildHelpPage() tview.Primitive {
+	a.helpView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	a.helpView.SetTitle("help — keyboard shortcuts").SetBorder(true)
+	a.helpView.SetText(helpText())
+	a.helpView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// Any key closes the help modal.
+		a.closeHelp()
+		return nil
+	})
+	return a.helpView
+}
+
+func helpText() string {
+	return strings.Join([]string{
+		"",
+		"  [yellow]Global[white]",
+		"    [white]q[gray]            quit",
+		"    [white]?[gray] / [white]h[gray]        toggle this help",
+		"    [white]e[gray]            switch to escalations",
+		"    [white]Esc[gray]          back to activity",
+		"",
+		"  [yellow]Activity page[white]",
+		"    [white]↑/↓[gray]          scroll activity",
+		"    [white]enter[gray]        expand reason",
+		"    [white]r[gray]            refresh config",
+		"",
+		"  [yellow]Escalations page[white]",
+		"    [white]↑/↓[gray]          scroll pending list",
+		"    [white]a[gray]            approve selected (audit only — agent already saw harness prompt)",
+		"    [white]d[gray]            deny selected (audit only)",
+		"    [white]R[gray]            refresh queue",
+		"",
+		"  [gray]Press any key to close help.",
+	}, "\n")
+}
+
+// globalInput handles keys that work from any page. The active page's
+// own primitive (e.g. the escalations List) gets first crack at the
+// event; this fires after for unhandled keys.
+func (a *App) globalInput(event *tcell.EventKey) *tcell.EventKey {
+	// `?` / `h` toggles help from anywhere except inside help (the help
+	// view's own input capture handles "any key closes").
+	if a.currentPage != pageHelp {
 		switch event.Rune() {
-		case 'q':
-			a.app.Stop()
+		case '?', 'h':
+			a.openHelp()
 			return nil
-		case 'r':
+		}
+	}
+
+	switch event.Rune() {
+	case 'q':
+		a.app.Stop()
+		return nil
+	case 'e':
+		a.switchTo(pageEscalations)
+		return nil
+	case 'r':
+		if a.currentPage == pageActivity {
 			a.refreshConfig()
 			return nil
 		}
-		return event
+	case 'R':
+		if a.currentPage == pageEscalations {
+			a.refreshEscalations()
+			return nil
+		}
+	}
+
+	if event.Key() == tcell.KeyEsc {
+		switch a.currentPage {
+		case pageEscalations, pageHelp:
+			a.switchTo(pageActivity)
+			return nil
+		}
+	}
+	return event
+}
+
+// escalationsInput handles keys when the escalations List is focused.
+// The List itself absorbs ↑/↓; we intercept `a` and `d` for verdicts
+// and let everything else fall through to globalInput.
+func (a *App) escalationsInput(event *tcell.EventKey) *tcell.EventKey {
+	switch event.Rune() {
+	case 'a':
+		a.completeSelected("approved")
+		return nil
+	case 'd':
+		a.completeSelected("blocked")
+		return nil
+	}
+	return event
+}
+
+func (a *App) switchTo(name string) {
+	if name == a.currentPage {
+		return
+	}
+	a.currentPage = name
+	a.pages.SwitchToPage(name)
+	if name == pageEscalations {
+		// Trigger a refresh on entry (synchronous so the list is
+		// populated by the time the user sees it).
+		go a.refreshEscalations()
+	}
+	a.app.QueueUpdateDraw(func() {
+		a.updateStatusBar()
 	})
+}
 
-	// Start reading events in background.
-	go a.readEvents()
+func (a *App) openHelp() {
+	a.prevPage = a.currentPage
+	a.currentPage = pageHelp
+	a.pages.SwitchToPage(pageHelp)
+	a.updateStatusBar()
+}
 
-	a.app.SetRoot(flex, true)
-	return a.app.Run()
+func (a *App) closeHelp() {
+	target := a.prevPage
+	if target == "" {
+		target = defaultPage
+	}
+	a.currentPage = target
+	a.pages.SwitchToPage(target)
+	a.updateStatusBar()
+}
+
+func (a *App) updateStatusBar() {
+	var hint string
+	switch a.currentPage {
+	case pageActivity:
+		hint = "[white]q[gray]:quit  [white]e[gray]:escalations  [white]↑/↓[gray]:scroll  [white]enter[gray]:expand  [white]r[gray]:refresh config"
+	case pageEscalations:
+		hint = "[white]q[gray]:quit  [white]a[gray]:approve  [white]d[gray]:deny  [white]R[gray]:refresh  [white]Esc[gray]:back"
+	case pageHelp:
+		hint = "[gray]press any key to close help"
+	default:
+		hint = "[white]q[gray]:quit"
+	}
+	if a.statusBar == nil {
+		return
+	}
+	a.statusBar.SetText(fmt.Sprintf("[yellow]%s[gray]   %s   [white]?[gray]:help", a.currentPage, hint))
 }
 
 func (a *App) readEvents() {
@@ -253,6 +444,7 @@ func (a *App) handleEvent(evt daemon.Event) {
 			a.latency.add(evt.LatencyMs)
 		}
 		a.updateLatencyDisplay()
+		a.maybeRefreshOnEvent(evt.Verdict)
 	}
 
 	// Update header on each event as a heartbeat.
@@ -364,6 +556,157 @@ func (a *App) UpdateConfig(endpoint, apiFormat, model string, timeoutMs int, aud
 	a.app.QueueUpdateDraw(func() {
 		a.configView.SetText(text)
 	})
+}
+
+// dialDaemon opens a fresh short-lived UDS connection for one
+// request/response. Mirrors the hook's pattern. Caller closes the conn.
+func (a *App) dialDaemon() (net.Conn, error) {
+	if a.socketPath == "" {
+		return nil, fmt.Errorf("no socket path configured")
+	}
+	return net.DialTimeout("unix", a.socketPath, 2*time.Second)
+}
+
+// fetchPending issues list_pending and returns the snapshot.
+func (a *App) fetchPending() ([]daemon.PendingEntry, error) {
+	conn, err := a.dialDaemon()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if err := json.NewEncoder(conn).Encode(daemon.Request{Type: daemon.TypeListPending}); err != nil {
+		return nil, err
+	}
+	var resp daemon.PendingResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, err
+	}
+	return resp.Pending, nil
+}
+
+// completePending issues complete_pending; humanDecision is "approved" or "blocked".
+func (a *App) completePending(projectHash, key, humanDecision string) error {
+	conn, err := a.dialDaemon()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	req := daemon.Request{
+		Type:          daemon.TypeCompletePending,
+		Key:           key,
+		ProjectHash:   projectHash,
+		HumanDecision: humanDecision,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return err
+	}
+	var resp daemon.CompleteResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("complete_pending: %s", resp.Error)
+	}
+	return nil
+}
+
+// refreshEscalations pulls the latest pending list and rebuilds the list view.
+func (a *App) refreshEscalations() {
+	pending, err := a.fetchPending()
+	if err != nil {
+		// Show the error in the empty banner. The list keeps whatever
+		// it had — partial visibility is better than blanking it.
+		a.app.QueueUpdateDraw(func() {
+			a.escalEmpty.SetText(fmt.Sprintf("[red]list_pending failed: %v[white]", err))
+		})
+		return
+	}
+
+	a.mu.Lock()
+	a.pending = pending
+	a.lastRefresh = time.Now()
+	a.mu.Unlock()
+
+	a.app.QueueUpdateDraw(func() {
+		a.rebuildEscalationList(pending)
+	})
+}
+
+func (a *App) rebuildEscalationList(pending []daemon.PendingEntry) {
+	if a.escalations == nil {
+		return
+	}
+	a.escalations.Clear()
+	if len(pending) == 0 {
+		a.escalEmpty.SetText(emptyEscalations)
+		return
+	}
+	a.escalEmpty.SetText(fmt.Sprintf("[gray]%d pending — [white]a[gray]:approve  [white]d[gray]:deny", len(pending)))
+	for _, p := range pending {
+		a.escalations.AddItem(escalationLabels(p))
+	}
+}
+
+// escalationLabels returns the (main, secondary, shortcut, selectFn)
+// values for tview.List.AddItem. Pure for testability.
+func escalationLabels(p daemon.PendingEntry) (string, string, rune, func()) {
+	main := fmt.Sprintf("[yellow]%s[white]: %s", p.Tool, truncate(p.Input, 80))
+	secondary := fmt.Sprintf("[gray]%s  [yellow]%s[gray]  %s", p.Timestamp, strings.ToUpper(p.Verdict), truncate(p.Reason, 100))
+	return main, secondary, 0, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 3 {
+		return s[:n]
+	}
+	return s[:n-3] + "..."
+}
+
+// completeSelected resolves the currently-highlighted pending escalation.
+// humanDecision is "approved" or "blocked".
+func (a *App) completeSelected(humanDecision string) {
+	if a.escalations == nil || a.escalations.GetItemCount() == 0 {
+		return
+	}
+	idx := a.escalations.GetCurrentItem()
+	a.mu.Lock()
+	if idx < 0 || idx >= len(a.pending) {
+		a.mu.Unlock()
+		return
+	}
+	target := a.pending[idx]
+	a.mu.Unlock()
+
+	go func() {
+		if err := a.completePending(target.ProjectHash, target.Key, humanDecision); err != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.escalEmpty.SetText(fmt.Sprintf("[red]complete_pending failed: %v[white]", err))
+			})
+			return
+		}
+		a.refreshEscalations()
+	}()
+}
+
+// maybeRefreshOnEvent debounces escalation-queue refreshes triggered by
+// inbound `escalate` events. Fires asynchronously so we don't block the
+// event reader.
+func (a *App) maybeRefreshOnEvent(verdict string) {
+	if verdict != "escalate" && verdict != "error" {
+		return
+	}
+	a.mu.Lock()
+	since := time.Since(a.lastRefresh)
+	a.mu.Unlock()
+	if since < refreshDebounce {
+		return
+	}
+	go a.refreshEscalations()
 }
 
 // Close shuts down the TUI and disconnects from the daemon.

@@ -171,6 +171,64 @@ func TestAuditLoggerPending(t *testing.T) {
 	}
 }
 
+func TestAuditLoggerListPending(t *testing.T) {
+	l := NewLogger("test-list", true)
+
+	// No pendings yet.
+	if got := l.ListPending(); len(got) != 0 {
+		t.Fatalf("expected empty list, got %d entries", len(got))
+	}
+
+	rec1 := AuditRecord{Timestamp: "2026-05-07T10:00:00Z", ToolName: "Bash", ToolInput: "rm -rf /", Verdict: "escalate", Reason: "scary"}
+	rec2 := AuditRecord{Timestamp: "2026-05-07T10:00:01Z", ToolName: "Read", ToolInput: "/etc/passwd", Verdict: "error", Reason: "evaluator down"}
+	if _, err := l.WritePending(rec1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.WritePending(rec2); err != nil {
+		t.Fatal(err)
+	}
+
+	got := l.ListPending()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 pending entries, got %d", len(got))
+	}
+	for _, p := range got {
+		if p.ProjectHash != "test-list" {
+			t.Errorf("expected projectHash propagated, got %q", p.ProjectHash)
+		}
+		if p.Key == "" {
+			t.Error("expected non-empty key")
+		}
+		if p.Tool == "" || p.Verdict == "" {
+			t.Errorf("missing fields in entry %+v", p)
+		}
+	}
+}
+
+func TestAuditLoggerListPendingDisabled(t *testing.T) {
+	l := NewLogger("test-disabled", false)
+	if got := l.ListPending(); got != nil {
+		t.Errorf("expected nil when disabled, got %d entries", len(got))
+	}
+}
+
+func TestAuditLoggerListPendingSnapshot(t *testing.T) {
+	// Mutating the returned slice must not affect internal state.
+	l := NewLogger("test-snap", true)
+	l.WritePending(AuditRecord{Timestamp: "t1", ToolName: "Bash", Verdict: "escalate"})
+
+	got := l.ListPending()
+	if len(got) != 1 {
+		t.Fatalf("expected 1, got %d", len(got))
+	}
+	got[0].Tool = "MUTATED"
+
+	got2 := l.ListPending()
+	if got2[0].Tool != "Bash" {
+		t.Errorf("internal state mutated by caller: got %q", got2[0].Tool)
+	}
+}
+
 func TestAuditLoggerFlushPending(t *testing.T) {
 	l := NewLogger("test-flush", true)
 	l.WritePending(AuditRecord{Timestamp: "t1", ToolName: "Bash", Verdict: "escalate"})

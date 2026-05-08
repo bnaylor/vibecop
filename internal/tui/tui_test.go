@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/bnaylor/vibecop/internal/daemon"
 )
 
 func TestLatencyStats(t *testing.T) {
@@ -72,6 +75,72 @@ func TestVerdictLabel(t *testing.T) {
 	}
 	if verdictLabel("unknown") != "UNKNOWN" {
 		t.Error("expected UNKNOWN for unrecognized verdicts")
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	cases := []struct{ in string; n int; want string }{
+		{"", 5, ""},
+		{"abc", 5, "abc"},
+		{"abcdef", 6, "abcdef"},
+		{"abcdef", 5, "ab..."},
+		{"abcdefgh", 4, "a..."},
+		{"abcdef", 2, "ab"},
+	}
+	for _, c := range cases {
+		got := truncate(c.in, c.n)
+		if got != c.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+	}
+}
+
+func TestEscalationLabels(t *testing.T) {
+	p := daemon.PendingEntry{
+		Tool:      "Bash",
+		Input:     "rm -rf /",
+		Verdict:   "escalate",
+		Reason:    "destructive",
+		Timestamp: "2026-05-07T10:00:00Z",
+	}
+	main, secondary, _, _ := escalationLabels(p)
+	if !strings.Contains(main, "Bash") {
+		t.Errorf("main should contain tool, got %q", main)
+	}
+	if !strings.Contains(main, "rm -rf /") {
+		t.Errorf("main should contain input, got %q", main)
+	}
+	if !strings.Contains(secondary, "ESCALATE") {
+		t.Errorf("secondary should contain uppercase verdict, got %q", secondary)
+	}
+	if !strings.Contains(secondary, "destructive") {
+		t.Errorf("secondary should contain reason, got %q", secondary)
+	}
+}
+
+func TestEscalationLabelsTruncates(t *testing.T) {
+	long := strings.Repeat("x", 200)
+	p := daemon.PendingEntry{Tool: "Bash", Input: long, Verdict: "escalate", Reason: long}
+	main, secondary, _, _ := escalationLabels(p)
+	if strings.Contains(main, long) {
+		t.Error("main should truncate long input")
+	}
+	if strings.Contains(secondary, long) {
+		t.Error("secondary should truncate long reason")
+	}
+}
+
+func TestHelpTextSections(t *testing.T) {
+	got := helpText()
+	for _, section := range []string{"Global", "Activity page", "Escalations page"} {
+		if !strings.Contains(got, section) {
+			t.Errorf("help text missing section %q", section)
+		}
+	}
+	for _, key := range []string{"q", "?", "e", "a", "d"} {
+		if !strings.Contains(got, "[white]"+key+"[gray]") {
+			t.Errorf("help text missing key %q", key)
+		}
 	}
 }
 

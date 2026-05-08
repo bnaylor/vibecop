@@ -21,6 +21,8 @@ import (
 const (
 	TypePermissionRequest = "permission_request"
 	TypeTUISubscribe      = "tui_subscribe"
+	TypeListPending       = "list_pending"
+	TypeCompletePending   = "complete_pending"
 )
 
 // Request from a hook or TUI client.
@@ -30,12 +32,42 @@ type Request struct {
 	Tool        string `json:"tool,omitempty"`
 	Input       string `json:"input,omitempty"`
 	SessionID   string `json:"session_id,omitempty"`
+
+	// Used by complete_pending requests.
+	Key           string `json:"key,omitempty"`
+	ProjectHash   string `json:"project_hash,omitempty"`
+	HumanDecision string `json:"human_decision,omitempty"`
 }
 
 // Verdict returned to a hook.
 type Verdict struct {
 	Verdict string `json:"verdict"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// PendingEntry is the daemon's wire shape for a pending escalation,
+// sent in the response to a list_pending request. Fields mirror
+// audit.PendingEscalation but the daemon package keeps no audit
+// import — start.go marshals the value across the boundary.
+type PendingEntry struct {
+	Key         string `json:"key"`
+	ProjectHash string `json:"project_hash"`
+	Timestamp   string `json:"timestamp"`
+	Tool        string `json:"tool"`
+	Input       string `json:"input,omitempty"`
+	Verdict     string `json:"verdict"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// PendingResponse is returned for list_pending.
+type PendingResponse struct {
+	Pending []PendingEntry `json:"pending"`
+}
+
+// CompleteResponse is returned for complete_pending.
+type CompleteResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // Event streamed to TUI subscribers.
@@ -53,6 +85,16 @@ type Event struct {
 // permissionHandler is called when a permission_request arrives.
 type permissionHandler func(req Request) Verdict
 
+// listPendingHandler is called when a list_pending request arrives.
+// Returns the merged set of pending escalations across all per-project
+// audit loggers. May return nil/empty when audit is disabled.
+type listPendingHandler func() []PendingEntry
+
+// completePendingHandler is called when a complete_pending request
+// arrives. Routes to the right per-project audit logger by projectHash
+// and finalises the record. Returns an error message (empty on success).
+type completePendingHandler func(projectHash, key, humanDecision string) error
+
 // Daemon is the UDS-based IPC server.
 type Daemon struct {
 	socketPath  string
@@ -63,6 +105,8 @@ type Daemon struct {
 	subsMu      sync.Mutex
 	otlpCh      chan Event
 	onPerm      permissionHandler
+	onList      listPendingHandler
+	onComplete  completePendingHandler
 	wg          sync.WaitGroup
 	quit        chan struct{}
 	stopOnce    sync.Once
@@ -83,6 +127,14 @@ func New(socketPath string, cfg config.Config) *Daemon {
 
 // OnPermission registers the handler for permission_request messages.
 func (d *Daemon) OnPermission(h permissionHandler) { d.onPerm = h }
+
+// OnListPending registers the handler for list_pending messages.
+// Optional — when nil, list_pending requests get an empty response.
+func (d *Daemon) OnListPending(h listPendingHandler) { d.onList = h }
+
+// OnCompletePending registers the handler for complete_pending messages.
+// Optional — when nil, complete_pending requests respond with an error.
+func (d *Daemon) OnCompletePending(h completePendingHandler) { d.onComplete = h }
 
 // RegisterOTLPSubscriber returns a buffered channel that receives every
 // daemon event for OTLP export. Peers with TUI subscribers in
@@ -249,6 +301,10 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		handlePermission(conn, req, d.onPerm)
 	case TypeTUISubscribe:
 		handleTUISubscribe(conn, d)
+	case TypeListPending:
+		handleListPending(conn, d.onList)
+	case TypeCompletePending:
+		handleCompletePending(conn, req, d.onComplete)
 	default:
 		log.Printf("daemon: unknown request type: %s", req.Type)
 		json.NewEncoder(conn).Encode(Verdict{
@@ -256,6 +312,42 @@ func (d *Daemon) handleConn(conn net.Conn) {
 			Reason:  "VibeCop: unknown request type",
 		})
 	}
+}
+
+func handleListPending(conn net.Conn, h listPendingHandler) {
+	resp := PendingResponse{Pending: nil}
+	if h != nil {
+		resp.Pending = h()
+	}
+	if resp.Pending == nil {
+		resp.Pending = []PendingEntry{}
+	}
+	json.NewEncoder(conn).Encode(resp)
+}
+
+func handleCompletePending(conn net.Conn, req Request, h completePendingHandler) {
+	if h == nil {
+		json.NewEncoder(conn).Encode(CompleteResponse{
+			OK:    false,
+			Error: "VibeCop: complete_pending handler not registered",
+		})
+		return
+	}
+	if req.Key == "" || req.ProjectHash == "" || req.HumanDecision == "" {
+		json.NewEncoder(conn).Encode(CompleteResponse{
+			OK:    false,
+			Error: "VibeCop: missing key, project_hash, or human_decision",
+		})
+		return
+	}
+	if err := h(req.ProjectHash, req.Key, req.HumanDecision); err != nil {
+		json.NewEncoder(conn).Encode(CompleteResponse{
+			OK:    false,
+			Error: err.Error(),
+		})
+		return
+	}
+	json.NewEncoder(conn).Encode(CompleteResponse{OK: true})
 }
 
 func handlePermission(conn net.Conn, req Request, handler permissionHandler) {
