@@ -176,17 +176,32 @@ func TestRebuildEscalationListPreservesSelectionByKey(t *testing.T) {
 		{ProjectHash: "h1", Key: "k1", Tool: "Bash", Verdict: "escalate"},
 		{ProjectHash: "h2", Key: "k2", Tool: "Read", Verdict: "error"},
 	}
-	a.rebuildEscalationList(initial)
+	a.rebuildEscalationList(initial, true)
 	a.escalations.SetCurrentItem(1)
 
 	refreshed := []daemon.PendingEntry{
 		{ProjectHash: "h2", Key: "k2", Tool: "Read", Verdict: "error"},
 		{ProjectHash: "h1", Key: "k1", Tool: "Bash", Verdict: "escalate"},
 	}
-	a.rebuildEscalationList(refreshed)
+	a.rebuildEscalationList(refreshed, true)
 
 	if got := a.escalations.GetCurrentItem(); got != 0 {
 		t.Fatalf("expected selection to follow h2/k2 to index 0, got %d", got)
+	}
+}
+
+func TestEmptyBannerFor(t *testing.T) {
+	off := emptyBannerFor(false, 0)
+	if !strings.Contains(off, "audit_enabled = false") {
+		t.Errorf("audit-off banner should call out the disabled config, got %q", off)
+	}
+	on0 := emptyBannerFor(true, 0)
+	if strings.Contains(on0, "audit_enabled") || !strings.Contains(on0, "no pending") {
+		t.Errorf("audit-on empty banner should not mention audit_enabled, got %q", on0)
+	}
+	on3 := emptyBannerFor(true, 3)
+	if !strings.Contains(on3, "3 pending") {
+		t.Errorf("audit-on populated banner should show count, got %q", on3)
 	}
 }
 

@@ -117,7 +117,7 @@ func TestListPendingConcurrentWithPermissionHandler(t *testing.T) {
 
 	d := &daemon.Daemon{}
 	perm := makePermissionHandler(fe, d, nil, 10, true, "test-model", "anthropic", stores, loggers, &storesMu)
-	list := makeListPendingHandler(loggers, &storesMu)
+	list := makeListPendingHandler(loggers, &storesMu, true)
 
 	req := daemon.Request{
 		Type:        daemon.TypePermissionRequest,
@@ -135,12 +135,16 @@ func TestListPendingConcurrentWithPermissionHandler(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			_ = list()
+			_, _ = list()
 		}()
 	}
 	wg.Wait()
 
-	if got := list(); len(got) == 0 {
+	got, auditEnabled := list()
+	if len(got) == 0 {
 		t.Fatal("expected pending escalations after concurrent permission requests")
+	}
+	if !auditEnabled {
+		t.Error("expected auditEnabled=true to round-trip through the handler")
 	}
 }

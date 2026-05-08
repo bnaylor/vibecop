@@ -293,7 +293,6 @@ func helpText() string {
 		"",
 		"  [yellow]Activity page[white]",
 		"    [white]↑/↓[gray]          scroll activity",
-		"    [white]enter[gray]        expand reason",
 		"    [white]r[gray]            refresh config",
 		"",
 		"  [yellow]Escalations page[white]",
@@ -399,7 +398,7 @@ func (a *App) updateStatusBar() {
 	var hint string
 	switch a.currentPage {
 	case pageActivity:
-		hint = "[white]q[gray]:quit  [white]e[gray]:escalations  [white]↑/↓[gray]:scroll  [white]enter[gray]:expand  [white]r[gray]:refresh config"
+		hint = "[white]q[gray]:quit  [white]e[gray]:escalations  [white]↑/↓[gray]:scroll  [white]r[gray]:refresh config"
 	case pageEscalations:
 		hint = "[white]q[gray]:quit  [white]a[gray]:approve  [white]d[gray]:deny  [white]R[gray]:refresh  [white]Esc[gray]:back"
 	case pageHelp:
@@ -575,22 +574,24 @@ func (a *App) dialDaemon() (net.Conn, error) {
 	return conn, nil
 }
 
-// fetchPending issues list_pending and returns the snapshot.
-func (a *App) fetchPending() ([]daemon.PendingEntry, error) {
+// fetchPending issues list_pending and returns the snapshot plus the
+// daemon's audit-enabled flag (so the UI can distinguish empty-queue
+// from audit-off).
+func (a *App) fetchPending() ([]daemon.PendingEntry, bool, error) {
 	conn, err := a.dialDaemon()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer conn.Close()
 
 	if err := json.NewEncoder(conn).Encode(daemon.Request{Type: daemon.TypeListPending}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var resp daemon.PendingResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return resp.Pending, nil
+	return resp.Pending, resp.AuditEnabled, nil
 }
 
 // completePending issues complete_pending; humanDecision is "approved" or "blocked".
@@ -624,7 +625,7 @@ func (a *App) completePending(projectHash, key, humanDecision string) error {
 func (a *App) refreshEscalations() {
 	defer a.finishEscalationRefresh()
 
-	pending, err := a.fetchPending()
+	pending, auditEnabled, err := a.fetchPending()
 	if err != nil {
 		// Show the error in the empty banner. The list keeps whatever
 		// it had — partial visibility is better than blanking it.
@@ -635,11 +636,11 @@ func (a *App) refreshEscalations() {
 	}
 
 	a.app.QueueUpdateDraw(func() {
-		a.rebuildEscalationList(pending)
+		a.rebuildEscalationList(pending, auditEnabled)
 	})
 }
 
-func (a *App) rebuildEscalationList(pending []daemon.PendingEntry) {
+func (a *App) rebuildEscalationList(pending []daemon.PendingEntry, auditEnabled bool) {
 	if a.escalations == nil {
 		return
 	}
@@ -655,16 +656,29 @@ func (a *App) rebuildEscalationList(pending []daemon.PendingEntry) {
 	a.pending = append([]daemon.PendingEntry(nil), pending...)
 	a.escalations.Clear()
 	if len(a.pending) == 0 {
-		a.escalEmpty.SetText(emptyEscalations)
+		a.escalEmpty.SetText(emptyBannerFor(auditEnabled, 0))
 		return
 	}
-	a.escalEmpty.SetText(fmt.Sprintf("[gray]%d pending — [white]a[gray]:approve  [white]d[gray]:deny", len(a.pending)))
+	a.escalEmpty.SetText(emptyBannerFor(auditEnabled, len(a.pending)))
 	for _, p := range a.pending {
 		a.escalations.AddItem(escalationLabels(p))
 	}
 	if idx := findPendingIndex(a.pending, prevProjectHash, prevKey); idx >= 0 {
 		a.escalations.SetCurrentItem(idx)
 	}
+}
+
+// emptyBannerFor returns the banner text for the escalation page.
+// Distinguishes "audit off — nothing will ever appear here" from
+// "audit on but queue is empty" and from "N pending — keys".
+func emptyBannerFor(auditEnabled bool, count int) string {
+	if !auditEnabled {
+		return "[yellow]audit_enabled = false[gray] — escalations are not retained; flip [white]audit_enabled[gray] in config.toml to use this queue"
+	}
+	if count == 0 {
+		return emptyEscalations
+	}
+	return fmt.Sprintf("[gray]%d pending — [white]a[gray]:approve  [white]d[gray]:deny", count)
 }
 
 // escalationLabels returns the (main, secondary, shortcut, selectFn)

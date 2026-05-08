@@ -59,9 +59,12 @@ type PendingEntry struct {
 	Reason      string `json:"reason,omitempty"`
 }
 
-// PendingResponse is returned for list_pending.
+// PendingResponse is returned for list_pending. AuditEnabled lets the
+// TUI distinguish "queue empty because audit is disabled" from "queue
+// empty because no escalations have happened yet".
 type PendingResponse struct {
-	Pending []PendingEntry `json:"pending"`
+	Pending      []PendingEntry `json:"pending"`
+	AuditEnabled bool           `json:"audit_enabled"`
 }
 
 // CompleteResponse is returned for complete_pending.
@@ -87,8 +90,9 @@ type permissionHandler func(req Request) Verdict
 
 // listPendingHandler is called when a list_pending request arrives.
 // Returns the merged set of pending escalations across all per-project
-// audit loggers. May return nil/empty when audit is disabled.
-type listPendingHandler func() []PendingEntry
+// audit loggers and whether audit is enabled in config (so the TUI can
+// distinguish empty-queue from audit-off).
+type listPendingHandler func() (entries []PendingEntry, auditEnabled bool)
 
 // completePendingHandler is called when a complete_pending request
 // arrives. Routes to the right per-project audit logger by projectHash
@@ -277,6 +281,16 @@ func (d *Daemon) shutdown() error {
 func (d *Daemon) handleConn(conn net.Conn) {
 	defer d.wg.Done()
 	defer conn.Close()
+	// AGENTS.md invariant 1 (fail-open): a panic in any registered
+	// handler — onPerm, onList, onComplete — must not crash the
+	// daemon process. The hook caller already times out and falls
+	// open if no verdict comes back; for TUI callers an aborted
+	// connection is harmless. Log and move on.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("daemon: handler panic recovered: %v", r)
+		}
+	}()
 
 	scanner := bufio.NewScanner(conn)
 	// Increase token limit for potentially large inputs.
@@ -317,7 +331,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 func handleListPending(conn net.Conn, h listPendingHandler) {
 	resp := PendingResponse{Pending: nil}
 	if h != nil {
-		resp.Pending = h()
+		resp.Pending, resp.AuditEnabled = h()
 	}
 	if resp.Pending == nil {
 		resp.Pending = []PendingEntry{}

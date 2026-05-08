@@ -65,7 +65,7 @@ var startCmd = &cobra.Command{
 		var storesMu sync.Mutex
 
 		d.OnPermission(makePermissionHandler(ec, d, tp, cfg.Daemon.ActivityWindow, cfg.Daemon.AuditEnabled, cfg.Model.Model, cfg.Model.APIFormat, stores, loggers, &storesMu))
-		d.OnListPending(makeListPendingHandler(loggers, &storesMu))
+		d.OnListPending(makeListPendingHandler(loggers, &storesMu, cfg.Daemon.AuditEnabled))
 		d.OnCompletePending(makeCompletePendingHandler(loggers, &storesMu))
 
 		// Subscribe telemetry log exporter to daemon events. Returns a
@@ -292,8 +292,9 @@ func makePermissionHandler(
 func makeListPendingHandler(
 	loggers map[string]*audit.Logger,
 	storesMu *sync.Mutex,
-) func() []daemon.PendingEntry {
-	return func() []daemon.PendingEntry {
+	auditEnabled bool,
+) func() ([]daemon.PendingEntry, bool) {
+	return func() ([]daemon.PendingEntry, bool) {
 		storesMu.Lock()
 		snapshot := make([]*audit.Logger, 0, len(loggers))
 		for _, l := range loggers {
@@ -315,7 +316,7 @@ func makeListPendingHandler(
 				})
 			}
 		}
-		return out
+		return out, auditEnabled
 	}
 }
 
