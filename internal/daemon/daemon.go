@@ -132,13 +132,20 @@ func (d *Daemon) Start() error {
 
 	log.Printf("daemon: listening on %s (pid %d)", d.socketPath, os.Getpid())
 
-	// Start the event broadcaster.
-	go d.broadcastEvents()
+	// Start the event broadcaster. Capture d.evtCh here (in Start, before
+	// any Stop can race) and pass it as a parameter so the goroutine never
+	// reads d.evtCh after shutdown() may have nil-ed it.
+	go d.broadcastEvents(d.evtCh)
 
-	// Accept loop.
+	// Accept loop. Capture the listener in a local so the goroutine holds a
+	// live reference even after shutdown() sets d.listener = nil. Without
+	// this capture, a goroutine scheduling window between listener.Close()
+	// and listener=nil lets the goroutine race to the top of the loop and
+	// call nil.Accept(), which panics.
+	l := d.listener
 	go func() {
 		for {
-			conn, err := d.listener.Accept()
+			conn, err := l.Accept()
 			if err != nil {
 				select {
 				case <-d.quit:
@@ -206,12 +213,17 @@ func (d *Daemon) shutdown() error {
 	d.subs = nil
 	d.subsMu.Unlock()
 
-	// Close event channel so broadcaster exits.
+	// Wait for in-flight connections first — before closing evtCh. handleConn
+	// goroutines (including the permission handler) call d.EmitEvent(), which
+	// sends to d.evtCh. Closing evtCh before they finish would panic (send on
+	// closed channel). TUI subscriber goroutines exit because their channels
+	// were closed above; permission goroutines finish their LLM call and return.
+	d.wg.Wait()
+
+	// Close event channel so broadcaster exits. Safe now that no more
+	// EmitEvent() callers are running (wg.Wait() above).
 	close(d.evtCh)
 	d.evtCh = nil
-
-	// Wait for in-flight connections (now unblocked).
-	d.wg.Wait()
 
 	// Remove socket.
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
@@ -304,8 +316,10 @@ func handleTUISubscribe(conn net.Conn, d *Daemon) {
 	d.subsMu.Unlock()
 }
 
-func (d *Daemon) broadcastEvents() {
-	for evt := range d.evtCh {
+func (d *Daemon) broadcastEvents(evtCh chan Event) {
+	// evtCh is passed by Start() at goroutine-creation time so we never read
+	// d.evtCh inside this goroutine — shutdown() may nil d.evtCh concurrently.
+	for evt := range evtCh {
 		d.subsMu.Lock()
 		for ch := range d.subs {
 			select {
