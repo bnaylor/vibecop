@@ -630,7 +630,8 @@ func TestEscalInFlightGuardPreventsDoubleDispatch(t *testing.T) {
 
 	// The call must short-circuit before spawning a goroutine, so
 	// escalInFlight stays true (it is only reset inside a
-	// QueueUpdateDraw closure, which the guard never reaches).
+	// QueueUpdateDraw closure, which is not executed when the guard
+	// short-circuits).
 	a.completeSelectedAndAdvance("approved")
 
 	if !a.escalInFlight {

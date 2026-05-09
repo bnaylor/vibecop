@@ -198,11 +198,6 @@ func TestStripValidationMarkersNoOpWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestResolveEditorParsesEditorWithFlags covers the VCOP-16 fix where
-// $EDITOR='vim --noplugin' previously failed silently because
-// exec.Command treated the whole string as a binary path while
-// supportsPlusLineFlag parsed only "vim".
-
 // TestEditConfigSymlinkResolution guards the fix where editConfigFile
 // calls filepath.EvalSymlinks before copyToTemp. Without the fix,
 // os.Rename would replace the symlink entry itself rather than the
@@ -250,6 +245,10 @@ func TestEditConfigSymlinkResolution(t *testing.T) {
 	}
 }
 
+// TestResolveEditorParsesEditorWithFlags covers the VCOP-16 fix where
+// $EDITOR='vim --noplugin' previously failed silently because
+// exec.Command treated the whole string as a binary path while
+// supportsPlusLineFlag parsed only "vim".
 func TestResolveEditorParsesEditorWithFlags(t *testing.T) {
 	t.Setenv("EDITOR", "vim --noplugin --cmd setSomething")
 	bin, args := resolveEditor()
