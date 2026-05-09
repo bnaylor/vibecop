@@ -241,8 +241,14 @@ func (a *App) buildActivityPage() tview.Primitive {
 	a.activity = tview.NewList().ShowSecondaryText(true)
 	a.activity.SetTitle("activity").SetBorder(true)
 
+	// Mark the activity List as the focused item inside its Flex chain.
+	// Without focus=true here, focus dead-ends at the middle Flex (which
+	// has no input handler for ↑/↓), so the List never receives arrow
+	// keys. Pages.SwitchToPage re-runs Focus() on the visible page and
+	// delegates down through Flexes via the per-item Focus flag — so the
+	// chain has to be marked end-to-end (middle: true, activity: true).
 	middle := tview.NewFlex().
-		AddItem(a.activity, 0, 3, false).
+		AddItem(a.activity, 0, 3, true).
 		AddItem(rightPanel, 0, 2, false)
 	flex.AddItem(middle, 0, 1, true)
 
