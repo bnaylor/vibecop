@@ -212,7 +212,7 @@ The TUI is organised as a `tview.Pages` tree with three pages — **activity** (
 **Activity page** (default):
 
 - **Header**: daemon status, active project, Guardian/Baseline mode indicator
-- **Activity feed**: scrollable list of recent verdicts — tool name, input summary, verdict badge (Approved / Escalated / Denied / Human: Approved / Human: Blocked), reason on expand, timestamp
+- **Activity feed**: a `tview.Table` of recent verdicts — columns are time (HH:MM:SS), verdict badge (Approved / Escalated / Denied / Human: Approved / Human: Blocked), tool name, and body (input + reason joined). When the activity pane has focus, ↑/↓ moves a highlight bar through rows, ←/→ scrolls horizontally to read long inputs, and `Enter` opens the activity-detail sheet for the highlighted row. Inputs are never truncated. While the activity pane is focused, the highlighted row stays visually pinned: incoming events shift selection + scroll offset by 1 in tandem, so the cursor never slides out from under the user. While unfocused, the table updates normally.
 - **Latency panel**: rolling average round-trip latency (last 50 requests), sample count, min/max
 - **Config summary**: active endpoint, model, timeout setting
 - **Log peek**: a 3-row bordered slot at the bottom of the right sidebar (below the config panel) showing the most recent daemon log entry (or `idle` when there's been no activity). The full multi-line history is preserved internally — focus the log slot and press `f` to expand it to a fullscreen scrollback view. Sits in the sidebar so it doesn't steal vertical rows from the activity feed.
@@ -221,6 +221,8 @@ Any of the four panels can be expanded to a fullscreen view via `f`; press `f` o
 
 **Escalations page**: lists in-memory pending audit records (those with verdict `escalate` or `error` whose `humanDecision` is still `null`). Each row shows the project hash, tool, truncated input, reason, and timestamp. Approving (`a`) or denying (`d`) finalises the audit record via the daemon's new `complete_pending` request, writing `humanDecision: "approved" | "blocked"` to the daily audit file. The agent's hook has already exited — this surface is a record-keeper / audit-completer, not a verdict gateway. The auto-refresh on incoming `escalate` events is debounced to ~250 ms, with at most one refresh dial in flight at a time.
 
+**Activity detail sheet**: opened by `Enter` on a highlighted activity row. Fullscreen page that renders every field of the underlying `daemon.Event` — full timestamp, tool, verdict (color-coded), latency, input, reason, message — with word-wrapping and ↑/↓ scroll for long reasons. `Esc` / `Enter` / `d` close it; focus returns to the activity table at the same selected row.
+
 **Help page**: full keyboard shortcut sheet, opened by `?` or `h` from any page. Any key closes it.
 
 **Status bar** (always visible): shows the current page name plus a context-aware key hint, ending with `?:help`.
@@ -228,7 +230,7 @@ Any of the four panels can be expanded to a fullscreen view via `f`; press `f` o
 Keyboard:
 
 - Global: `q` quit, `?` / `h` toggle help, `e` switch to escalations, `Esc` back to activity.
-- Activity: `Tab` / `Shift-Tab` cycle focus across panes (activity → latency → config → log → activity); the focused pane has a yellow border. `↑/↓` scrolls within the focused pane. `f` expands the focused pane to fullscreen (`f` or `Esc` collapses back). `r` refreshes the config pane from the daemon.
+- Activity: `Tab` / `Shift-Tab` cycle focus across activity → config → log; the focused pane has a yellow border. `↑/↓` moves the highlight bar in the activity table or scrolls in the other panes. `←/→` scrolls horizontally across long activity rows. `Enter` opens the detail sheet for the highlighted row. `f` expands the focused pane to fullscreen (`f` or `Esc` collapses back). `r` refreshes the config pane from the daemon.
 - Escalations: `↑/↓` scroll, `a` approve (audit), `d` deny (audit), `R` refresh queue.
 
 The escalation queue model is **non-blocking** by design: the daemon does not hold the hook connection open while a human decides. Holding open would invert the fail-open invariant (an absent operator stalls the agent indefinitely) and conflict with the harness's own PreToolUse timeout. A blocking-hold variant could be added later as an opt-in mode.

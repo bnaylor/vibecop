@@ -205,10 +205,10 @@ func TestToggleFullscreenIgnoredOnNonActivityPages(t *testing.T) {
 	}
 }
 
-func TestFormatActivityLineNoTruncation(t *testing.T) {
+func TestFormatActivityCellsNoTruncation(t *testing.T) {
 	// 200-char input that previously got ellipsised at 57 + "..." in
-	// the List-based renderer. With the TextView + horizontal scroll
-	// design the full text must round-trip into the rendered line.
+	// the List-based renderer. With Table + horizontal scroll the full
+	// body cell must hold the entire input.
 	longInput := strings.Repeat("x", 200)
 	evt := daemon.Event{
 		Tool:      "Bash",
@@ -216,20 +216,19 @@ func TestFormatActivityLineNoTruncation(t *testing.T) {
 		Verdict:   "approve",
 		Timestamp: "2026-05-08T20:13:01Z",
 	}
-	got := formatActivityLine(evt)
-	if !strings.Contains(got, longInput) {
-		t.Fatalf("expected full input preserved (no ellipsis); got: %q", got)
+	ts, _, _, body, _ := formatActivityCells(evt)
+	if !strings.Contains(body, longInput) {
+		t.Fatalf("expected full input preserved (no ellipsis); got: %q", body)
 	}
-	if strings.Contains(got, "...") {
-		t.Errorf("ellipsis must not appear in formatted line; got: %q", got)
+	if strings.Contains(body, "...") {
+		t.Errorf("ellipsis must not appear; got: %q", body)
 	}
-	// Timestamp should be truncated to HH:MM:SS for the embedded view.
-	if !strings.Contains(got, "20:13:01") || strings.Contains(got, "2026-05-08") {
-		t.Errorf("expected HH:MM:SS timestamp without date prefix; got: %q", got)
+	if ts != "20:13:01" {
+		t.Errorf("expected HH:MM:SS timestamp, got %q", ts)
 	}
 }
 
-func TestFormatActivityLineWithReason(t *testing.T) {
+func TestFormatActivityCellsWithReason(t *testing.T) {
 	evt := daemon.Event{
 		Tool:      "Bash",
 		Input:     "rm -rf /etc/passwd",
@@ -237,15 +236,68 @@ func TestFormatActivityLineWithReason(t *testing.T) {
 		Reason:    "Critical system file",
 		Timestamp: "2026-05-08T20:13:01Z",
 	}
-	got := formatActivityLine(evt)
-	if !strings.Contains(got, "rm -rf /etc/passwd") {
-		t.Errorf("expected input in line; got: %q", got)
+	_, verdict, tool, body, _ := formatActivityCells(evt)
+	if !strings.Contains(body, "rm -rf /etc/passwd") {
+		t.Errorf("expected input in body; got: %q", body)
 	}
-	if !strings.Contains(got, "Critical system file") {
-		t.Errorf("expected reason in line; got: %q", got)
+	if !strings.Contains(body, "Critical system file") {
+		t.Errorf("expected reason in body; got: %q", body)
 	}
-	if !strings.Contains(got, "DENIED") {
-		t.Errorf("expected verdict label DENIED; got: %q", got)
+	if verdict != "DENIED" {
+		t.Errorf("expected verdict label DENIED, got %q", verdict)
+	}
+	if tool != "Bash" {
+		t.Errorf("expected tool Bash, got %q", tool)
+	}
+}
+
+func TestFormatDetailContentRendersAllFields(t *testing.T) {
+	evt := daemon.Event{
+		Tool:      "Bash",
+		Input:     "rm -rf /etc/passwd",
+		Verdict:   "deny",
+		Reason:    "Critical system file. Would brick the host.",
+		LatencyMs: 345,
+		Timestamp: "2026-05-08T20:13:01Z",
+		Level:     "warn",
+		Message:   "synthetic test message",
+	}
+	got := formatDetailContent(evt)
+	for _, want := range []string{
+		"2026-05-08T20:13:01Z", // full timestamp on detail sheet
+		"Bash",
+		"DENIED",
+		"345 ms",
+		"warn",
+		"rm -rf /etc/passwd",
+		"Critical system file",
+		"synthetic test message",
+		"Esc / Enter / d to close",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("detail content missing %q; got: %s", want, got)
+		}
+	}
+}
+
+func TestFormatDetailContentHandlesEmptyFields(t *testing.T) {
+	// approve verdicts often arrive with no reason/message — the
+	// formatter must not render empty bullets in that case.
+	evt := daemon.Event{
+		Tool:      "Read",
+		Input:     "/tmp/x",
+		Verdict:   "approve",
+		Timestamp: "2026-05-08T20:13:01Z",
+	}
+	got := formatDetailContent(evt)
+	if strings.Contains(got, "Reason:") {
+		t.Errorf("empty reason should be omitted; got: %s", got)
+	}
+	if strings.Contains(got, "Message:") {
+		t.Errorf("empty message should be omitted; got: %s", got)
+	}
+	if !strings.Contains(got, "APPROVED") {
+		t.Errorf("approve verdict should render label APPROVED; got: %s", got)
 	}
 }
 

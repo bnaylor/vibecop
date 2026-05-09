@@ -111,9 +111,20 @@ const (
 	pageEscalations  = "escalations"
 	pageHelp         = "help"
 	pageFullscreen   = "fullscreen"
+	pageDetail       = "detail"
 	defaultPage      = pageActivity
 	refreshDebounce  = 250 * time.Millisecond
 	emptyEscalations = "[gray](no pending escalations)"
+)
+
+// Activity table column indices. col 0's Reference holds the full
+// daemon.Event so the detail sheet can render every field without
+// having to maintain a parallel events slice.
+const (
+	colTime    = 0
+	colVerdict = 1
+	colTool    = 2
+	colBody    = 3
 )
 
 // App is the tview-based TUI.
@@ -124,13 +135,14 @@ type App struct {
 	socketPath string
 
 	headerView  *tview.TextView
-	activity    *tview.TextView
+	activity    *tview.Table
 	latencyView *tview.TextView
 	configView  *tview.TextView
 	logView     *tview.TextView
 	escalations *tview.List
 	escalEmpty  *tview.TextView
 	helpView    *tview.TextView
+	detailView  *tview.TextView
 	statusBar   *tview.TextView
 	pages       *tview.Pages
 
@@ -159,12 +171,6 @@ type App struct {
 	latency       *latencyStats
 	events        int
 	logHasEntries bool
-
-	// activityRows holds the formatted lines that render in the
-	// activity TextView. Newest first (matching the previous List
-	// ordering: latest event on top). Capped at maxActivityItems.
-	// Rebuilt on each addActivity since TextView has no insert API.
-	activityRows []string
 
 	mu sync.Mutex
 }
@@ -217,14 +223,15 @@ func (a *App) runUI() error {
 	a.headerView.SetBorder(true).SetBorderPadding(0, 0, 1, 1)
 	root.AddItem(a.headerView, 3, 0, false)
 
-	// Pages — activity, escalations, help, plus a fullscreen overlay
-	// page that hosts whichever activity-page pane the user has expanded.
+	// Pages — activity, escalations, help, fullscreen overlay, and the
+	// activity detail sheet (Enter on a selected row).
 	a.pages = tview.NewPages()
 	a.pages.AddPage(pageActivity, a.buildActivityPage(), true, true)
 	a.pages.AddPage(pageEscalations, a.buildEscalationsPage(), true, false)
 	a.pages.AddPage(pageHelp, a.buildHelpPage(), true, false)
 	a.fullscreenContainer = tview.NewFlex().SetDirection(tview.FlexRow)
 	a.pages.AddPage(pageFullscreen, a.fullscreenContainer, true, false)
+	a.pages.AddPage(pageDetail, a.buildDetailPage(), true, false)
 	root.AddItem(a.pages, 0, 1, true)
 
 	// Status bar (context-aware).
@@ -296,21 +303,24 @@ func (a *App) buildActivityPage() tview.Primitive {
 	a.logView.SetText("[gray]idle  ([white]f[gray] to expand)[white]")
 	rightPanel.AddItem(a.logView, 3, 0, false)
 
-	// Activity feed is a TextView (not a List) so we can:
-	//   - SetWrap(false): never wrap or truncate; long input strings
-	//     stay on one line and run off the right edge of the viewport.
-	//   - SetScrollable(true): focus + ←/→ scroll horizontally to see
-	//     the rest of a long line; ↑/↓ scrolls vertically through
-	//     history. Works the same in the embedded slot and fullscreen.
-	// tview.List clips its items at the right border with no horizontal
-	// scroll affordance, which is why we used to truncate input at 60
-	// chars with an ellipsis. Now nothing is hidden.
-	a.activity = tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft).
-		SetWrap(false).
-		SetScrollable(true)
+	// Activity feed is a tview.Table so we get all three behaviors at
+	// once: row selection (highlight bar), horizontal scroll across
+	// long inputs, and an Enter handler for the detail sheet. Each
+	// row's first cell carries a Reference to the full daemon.Event,
+	// so the detail sheet can render every field without a parallel
+	// events slice.
+	//
+	// SetSelectable(true, false): rows selectable, columns not. ↑/↓
+	// moves the highlight; ←/→ scrolls horizontally when content
+	// extends past the viewport; Enter fires SetSelectedFunc.
+	//
+	// SetFixed(0, 1): keeps the time column locked when scrolling
+	// horizontally so the user always sees which event each row is.
+	a.activity = tview.NewTable().
+		SetSelectable(true, false).
+		SetFixed(0, 1)
 	a.activity.SetTitle("activity").SetBorder(true)
+	a.activity.SetSelectedFunc(func(row, _ int) { a.openDetail(row) })
 
 	// Mark the activity List as the focused item inside its Flex chain.
 	// Without focus=true here, focus dead-ends at the middle Flex (which
@@ -388,6 +398,127 @@ func (a *App) buildHelpPage() tview.Primitive {
 	return a.helpView
 }
 
+// buildDetailPage builds the activity-detail sheet — a fullscreen
+// scrollable TextView that renders every field of the selected event.
+// Esc / Enter / d close it (handled in the view's input capture). The
+// view's content is set lazily via openDetail; the page itself is
+// constructed once at startup.
+func (a *App) buildDetailPage() tview.Primitive {
+	a.detailView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft).
+		SetWrap(true).
+		SetWordWrap(true).
+		SetScrollable(true)
+	a.detailView.SetTitle("activity detail").SetBorder(true)
+	a.detailView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEsc, tcell.KeyEnter:
+			a.closeDetail()
+			return nil
+		}
+		// Single-key shortcut to close so the user can dismiss without
+		// reaching for Esc.
+		if event.Rune() == 'd' {
+			a.closeDetail()
+			return nil
+		}
+		// Everything else (↑/↓/PgUp/PgDn) falls through to the
+		// TextView's default scrolling.
+		return event
+	})
+	return a.detailView
+}
+
+// openDetail renders the event at activity table row `row` into the
+// detail sheet and switches to the detail page. Lookup is via the
+// Reference attached to col 0; if missing, the page just shows an
+// empty banner instead of erroring.
+func (a *App) openDetail(row int) {
+	if a.activity == nil || row < 0 {
+		return
+	}
+	cell := a.activity.GetCell(row, colTime)
+	if cell == nil {
+		return
+	}
+	evt, ok := cell.GetReference().(daemon.Event)
+	if !ok {
+		return
+	}
+	a.detailView.SetText(formatDetailContent(evt))
+	a.detailView.ScrollToBeginning()
+	a.currentPage = pageDetail
+	a.pages.SwitchToPage(pageDetail)
+	a.app.SetFocus(a.detailView)
+	a.updateStatusBar()
+}
+
+// closeDetail returns from the detail sheet to the activity page,
+// restoring focus to the activity table so the user resumes from the
+// same selected row they came in on.
+func (a *App) closeDetail() {
+	a.currentPage = pageActivity
+	a.pages.SwitchToPage(pageActivity)
+	if len(a.activityFocusables) > 0 {
+		a.app.SetFocus(a.activityFocusables[a.activityFocusIdx])
+	}
+	a.updateStatusBar()
+}
+
+// formatDetailContent renders all fields we have for an event into a
+// human-readable rich view. Pure for testability.
+func formatDetailContent(evt daemon.Event) string {
+	var sb strings.Builder
+	colorName := verdictColor(evt.Verdict).String()
+
+	sb.WriteString("\n")
+	writeField := func(label, value string) {
+		sb.WriteString(fmt.Sprintf("  [yellow]%-11s[white] %s\n", label+":", value))
+	}
+	writeField("Timestamp", emptyOrValue(evt.Timestamp))
+	writeField("Tool", emptyOrValue(evt.Tool))
+	sb.WriteString(fmt.Sprintf("  [yellow]%-11s[white] [%s]%s[white]\n",
+		"Verdict:", colorName, verdictLabel(evt.Verdict)))
+	if evt.LatencyMs > 0 {
+		writeField("Latency", fmt.Sprintf("%d ms", evt.LatencyMs))
+	}
+	if evt.Level != "" {
+		writeField("Level", evt.Level)
+	}
+
+	if evt.Input != "" {
+		sb.WriteString("\n  [yellow]Input:[white]\n")
+		sb.WriteString(indentBlock(evt.Input, "    ") + "\n")
+	}
+	if evt.Reason != "" {
+		sb.WriteString("\n  [yellow]Reason:[white]\n")
+		sb.WriteString(indentBlock(evt.Reason, "    ") + "\n")
+	}
+	if evt.Message != "" {
+		sb.WriteString("\n  [yellow]Message:[white]\n")
+		sb.WriteString(indentBlock(evt.Message, "    ") + "\n")
+	}
+
+	sb.WriteString("\n  [gray]── Esc / Enter / d to close ──[white]\n")
+	return sb.String()
+}
+
+func emptyOrValue(s string) string {
+	if s == "" {
+		return "[gray](none)[white]"
+	}
+	return s
+}
+
+func indentBlock(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
 func helpText() string {
 	return strings.Join([]string{
 		"",
@@ -399,7 +530,9 @@ func helpText() string {
 		"",
 		"  [yellow]Activity page[white]",
 		"    [white]Tab[gray] / [white]Shift-Tab[gray]  cycle focus across panes (yellow border)",
-		"    [white]↑/↓[gray]          scroll within focused pane",
+		"    [white]↑/↓[gray]          move highlight (activity) / scroll (other panes)",
+		"    [white]←/→[gray]          horizontal scroll of long entries",
+		"    [white]Enter[gray]        open detail sheet for highlighted event",
 		"    [white]f[gray]            expand focused pane to fullscreen ([white]Esc[gray] / [white]f[gray] to collapse)",
 		"    [white]r[gray]            refresh config",
 		"",
@@ -461,6 +594,9 @@ func (a *App) globalInput(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		case pageFullscreen:
 			a.toggleFullscreen()
+			return nil
+		case pageDetail:
+			a.closeDetail()
 			return nil
 		}
 	}
@@ -586,13 +722,15 @@ func (a *App) updateStatusBar() {
 	var hint string
 	switch a.currentPage {
 	case pageActivity:
-		hint = "[white]q[gray]:quit  [white]e[gray]:escalations  [white]Tab[gray]:next pane  [white]↑/↓[gray]:scroll  [white]f[gray]:fullscreen  [white]r[gray]:refresh config"
+		hint = "[white]q[gray]:quit  [white]e[gray]:escalations  [white]↑/↓[gray]:select  [white]Enter[gray]:detail  [white]Tab[gray]:next pane  [white]f[gray]:fullscreen  [white]r[gray]:refresh"
 	case pageEscalations:
 		hint = "[white]q[gray]:quit  [white]a[gray]:approve  [white]d[gray]:deny  [white]R[gray]:refresh  [white]Esc[gray]:back"
 	case pageHelp:
 		hint = "[gray]press any key to close help"
 	case pageFullscreen:
 		hint = "[white]q[gray]:quit  [white]Esc[gray] / [white]f[gray]:collapse"
+	case pageDetail:
+		hint = "[white]q[gray]:quit  [white]↑/↓[gray]:scroll  [white]Esc[gray] / [white]Enter[gray] / [white]d[gray]:close"
 	default:
 		hint = "[white]q[gray]:quit"
 	}
@@ -648,61 +786,90 @@ func (a *App) handleEvent(evt daemon.Event) {
 	a.updateHeader(evt)
 }
 
+// addActivity inserts a new event at the top of the activity Table
+// (newest-first). The hot subtlety is the highlight: when the user has
+// the activity pane focused, the highlighted row must stay visually
+// pinned regardless of how many events arrive — the cursor should
+// never slide out from under the user. We achieve that by reading the
+// current selection + scroll offset, inserting at row 0, then bumping
+// both by 1 (the count we just prepended). When the user has Tab'd
+// away to another pane, no compensation is needed and the table
+// scrolls naturally.
 func (a *App) addActivity(evt daemon.Event) {
-	line := formatActivityLine(evt)
-
-	a.mu.Lock()
-	a.activityRows = append([]string{line}, a.activityRows...)
-	if len(a.activityRows) > maxActivityItems {
-		a.activityRows = a.activityRows[:maxActivityItems]
-	}
-	text := strings.Join(a.activityRows, "\n")
-	a.mu.Unlock()
+	ts, verdict, tool, body, vColor := formatActivityCells(evt)
 
 	a.app.QueueUpdateDraw(func() {
-		a.activity.SetText(text)
+		focused := a.app.GetFocus() == a.activity
+		var prevSelRow, prevOffRow int
+		if focused {
+			prevSelRow, _ = a.activity.GetSelection()
+			prevOffRow, _ = a.activity.GetOffset()
+		}
+
+		a.activity.InsertRow(0)
+		// First cell carries the full event for the detail sheet.
+		a.activity.SetCell(0, colTime,
+			tview.NewTableCell(ts).
+				SetTextColor(tcell.ColorDarkGray).
+				SetReference(evt))
+		a.activity.SetCell(0, colVerdict,
+			tview.NewTableCell(verdict).
+				SetTextColor(vColor))
+		a.activity.SetCell(0, colTool,
+			tview.NewTableCell(tool).
+				SetTextColor(tcell.ColorYellow))
+		a.activity.SetCell(0, colBody,
+			tview.NewTableCell(body).
+				SetTextColor(tcell.ColorWhite).
+				SetExpansion(1))
+
+		// Trim oldest rows to cap memory.
+		for a.activity.GetRowCount() > maxActivityItems {
+			a.activity.RemoveRow(a.activity.GetRowCount() - 1)
+		}
+
+		if focused {
+			// Pin: the row the user was on is now at prevSelRow+1.
+			// Shifting both selection and offset by 1 keeps the
+			// highlighted row in the same screen position.
+			a.activity.Select(prevSelRow+1, 0)
+			a.activity.SetOffset(prevOffRow+1, 0)
+		}
 	})
 }
 
-// formatActivityLine renders one event as a single line. Columnar
-// layout (timestamp · verdict · tool · input · reason) with fixed
-// widths so the columns line up; the right-most column (input + reason)
-// is left intact at full length so the user can horizontally scroll
-// to see it instead of having it ellipsised. Pure for testability.
-func formatActivityLine(evt daemon.Event) string {
-	colorName := verdictColor(evt.Verdict).String()
-	label := verdictLabel(evt.Verdict)
-
+// formatActivityCells renders the per-column strings for one event.
+// Pure (no tview state) so it can be unit-tested. The right-most cell
+// (body) holds input + optional reason at full length — nothing is
+// truncated; horizontal scroll reveals everything off-screen.
+func formatActivityCells(evt daemon.Event) (ts, verdict, tool, body string, vColor tcell.Color) {
 	// Timestamps from the daemon are RFC3339-ish; show just HH:MM:SS
 	// in the embedded view. The full timestamp is still visible in
-	// the audit log for forensic use.
-	ts := evt.Timestamp
+	// the audit log and on the detail sheet.
+	ts = evt.Timestamp
 	if i := strings.Index(ts, "T"); i >= 0 && len(ts) >= i+9 {
 		ts = ts[i+1 : i+9]
 	} else if len(ts) > 8 {
 		ts = ts[:8]
 	}
 
-	tool := evt.Tool
+	verdict = verdictLabel(evt.Verdict)
+	vColor = verdictColor(evt.Verdict)
+
+	tool = evt.Tool
 	if tool == "" {
 		tool = "-"
 	}
-	body := evt.Input
+
+	body = evt.Input
 	if evt.Reason != "" {
 		if body != "" {
-			body += "  [gray]·[white] " + evt.Reason
+			body += "  · " + evt.Reason
 		} else {
-			body = "[gray]·[white] " + evt.Reason
+			body = "· " + evt.Reason
 		}
 	}
-
-	// Widths chosen to fit common values without padding the input
-	// off-screen on a narrow viewport: ESCALATED (9) and Notebook (8)
-	// are the worst-case for verdict and tool respectively.
-	return fmt.Sprintf(
-		"[gray]%-8s[white]  [%s]%-9s[white]  [yellow]%-10s[white]  %s",
-		ts, colorName, label, tool, body,
-	)
+	return
 }
 
 func (a *App) addLogLine(evt daemon.Event) {
