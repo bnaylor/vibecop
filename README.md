@@ -186,8 +186,4 @@ vibecop refine             Regenerate the Guardian prompt (uses recent activity 
 
 This project grew out of experimentation with the AI second-opinion concept — the idea that a second, context-free model evaluating tool-use requests is more trustworthy than a human who's been clicking Approve for two hours. `vibecop` is the standalone, no-GUI version: a single static binary that runs anywhere Go runs, with no Electron and no dependencies on any particular coding harness's UI.
 
----
-
-## Status
-
 See [`docs/spec.md`](docs/spec.md) for the full design specification.
