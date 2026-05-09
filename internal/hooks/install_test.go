@@ -950,10 +950,6 @@ func TestUninstallClaudePreservesOtherHookTypes(t *testing.T) {
 	if _, ok := hooksAny["PostToolUse"]; !ok {
 		t.Error("PostToolUse was removed during vibecop uninstall")
 	}
-	if _, ok := hooksAny["PreToolUse"]; ok {
-		// PreToolUse may have been removed or become empty; just ensure
-		// PostToolUse survived.
-	}
 }
 
 func TestInstallGeminiPreservesOtherHookTypes(t *testing.T) {

@@ -552,7 +552,11 @@ func readRawJSON(path string) map[string]any {
 // map[string]any, creating a new empty map if the key is absent or holds a
 // non-map value. Callers must write the returned map back via
 // raw["hooks"] = m after modifying it, because a newly-created map is not
-// automatically inserted.
+// automatically inserted. Example:
+//
+//	m := rawHooksMap(raw)
+//	m["PreToolUse"] = entries
+//	raw["hooks"] = m
 func rawHooksMap(raw map[string]any) map[string]any {
 	if m, ok := raw["hooks"].(map[string]any); ok {
 		return m
