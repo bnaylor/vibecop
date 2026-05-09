@@ -21,6 +21,9 @@ import (
 const (
 	TypePermissionRequest = "permission_request"
 	TypeTUISubscribe      = "tui_subscribe"
+	TypeListPending       = "list_pending"
+	TypeCompletePending   = "complete_pending"
+	TypeGetConfig         = "get_config"
 )
 
 // Request from a hook or TUI client.
@@ -30,14 +33,58 @@ type Request struct {
 	Tool        string `json:"tool,omitempty"`
 	Input       string `json:"input,omitempty"`
 	SessionID   string `json:"session_id,omitempty"`
-	Harness     string `json:"harness,omitempty"`
-	HookEvent   string `json:"hook_event,omitempty"`
+
+	// Used by complete_pending requests.
+	Key           string `json:"key,omitempty"`
+	ProjectHash   string `json:"project_hash,omitempty"`
+	HumanDecision string `json:"human_decision,omitempty"`
+	Harness       string `json:"harness,omitempty"`
+	HookEvent     string `json:"hook_event,omitempty"`
 }
 
 // Verdict returned to a hook.
 type Verdict struct {
 	Verdict string `json:"verdict"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// PendingEntry is the daemon's wire shape for a pending escalation,
+// sent in the response to a list_pending request. Fields mirror
+// audit.PendingEscalation but the daemon package keeps no audit
+// import — start.go marshals the value across the boundary.
+type PendingEntry struct {
+	Key         string `json:"key"`
+	ProjectHash string `json:"project_hash"`
+	Timestamp   string `json:"timestamp"`
+	Tool        string `json:"tool"`
+	Input       string `json:"input,omitempty"`
+	Verdict     string `json:"verdict"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// PendingResponse is returned for list_pending. AuditEnabled lets the
+// TUI distinguish "queue empty because audit is disabled" from "queue
+// empty because no escalations have happened yet".
+type PendingResponse struct {
+	Pending      []PendingEntry `json:"pending"`
+	AuditEnabled bool           `json:"audit_enabled"`
+}
+
+// CompleteResponse is returned for complete_pending.
+type CompleteResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// ConfigResponse is returned for get_config. Mirrors the subset of
+// daemon/model config the TUI displays. Excludes secrets (api_key) by
+// construction — the TUI must never need them.
+type ConfigResponse struct {
+	Endpoint     string `json:"endpoint"`
+	APIFormat    string `json:"api_format"`
+	Model        string `json:"model"`
+	TimeoutMs    int    `json:"timeout_ms"`
+	AuditEnabled bool   `json:"audit_enabled"`
 }
 
 // Event streamed to TUI subscribers.
@@ -57,6 +104,21 @@ type Event struct {
 // permissionHandler is called when a permission_request arrives.
 type permissionHandler func(req Request) Verdict
 
+// listPendingHandler is called when a list_pending request arrives.
+// Returns the merged set of pending escalations across all per-project
+// audit loggers and whether audit is enabled in config (so the TUI can
+// distinguish empty-queue from audit-off).
+type listPendingHandler func() (entries []PendingEntry, auditEnabled bool)
+
+// completePendingHandler is called when a complete_pending request
+// arrives. Routes to the right per-project audit logger by projectHash
+// and finalises the record. Returns an error message (empty on success).
+type completePendingHandler func(projectHash, key, humanDecision string) error
+
+// getConfigHandler is called when a get_config request arrives. Returns
+// the daemon's effective config snapshot for display in the TUI.
+type getConfigHandler func() ConfigResponse
+
 // Daemon is the UDS-based IPC server.
 type Daemon struct {
 	socketPath  string
@@ -67,6 +129,9 @@ type Daemon struct {
 	subsMu      sync.Mutex
 	otlpCh      chan Event
 	onPerm      permissionHandler
+	onList      listPendingHandler
+	onComplete  completePendingHandler
+	onGetConfig getConfigHandler
 	wg          sync.WaitGroup
 	quit        chan struct{}
 	stopOnce    sync.Once
@@ -87,6 +152,18 @@ func New(socketPath string, cfg config.Config) *Daemon {
 
 // OnPermission registers the handler for permission_request messages.
 func (d *Daemon) OnPermission(h permissionHandler) { d.onPerm = h }
+
+// OnListPending registers the handler for list_pending messages.
+// Optional — when nil, list_pending requests get an empty response.
+func (d *Daemon) OnListPending(h listPendingHandler) { d.onList = h }
+
+// OnCompletePending registers the handler for complete_pending messages.
+// Optional — when nil, complete_pending requests respond with an error.
+func (d *Daemon) OnCompletePending(h completePendingHandler) { d.onComplete = h }
+
+// OnGetConfig registers the handler for get_config messages. Optional —
+// when nil, get_config requests get a zero-valued response.
+func (d *Daemon) OnGetConfig(h getConfigHandler) { d.onGetConfig = h }
 
 // RegisterOTLPSubscriber returns a buffered channel that receives every
 // daemon event for OTLP export. Peers with TUI subscribers in
@@ -241,6 +318,16 @@ func (d *Daemon) shutdown() error {
 func (d *Daemon) handleConn(conn net.Conn) {
 	defer d.wg.Done()
 	defer conn.Close()
+	// AGENTS.md invariant 1 (fail-open): a panic in any registered
+	// handler — onPerm, onList, onComplete — must not crash the
+	// daemon process. The hook caller already times out and falls
+	// open if no verdict comes back; for TUI callers an aborted
+	// connection is harmless. Log and move on.
+	defer func() {
+		if r := recover(); r != nil {
+		log.Printf("daemon: handler panic recovered: %v", r)
+		}
+	}()
 
 	scanner := bufio.NewScanner(conn)
 	// Increase token limit for potentially large inputs.
@@ -265,6 +352,12 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		handlePermission(conn, req, d.onPerm)
 	case TypeTUISubscribe:
 		handleTUISubscribe(conn, d)
+	case TypeListPending:
+		handleListPending(conn, d.onList)
+	case TypeCompletePending:
+		handleCompletePending(conn, req, d.onComplete)
+	case TypeGetConfig:
+		handleGetConfig(conn, d.onGetConfig)
 	default:
 		log.Printf("daemon: unknown request type: %s", req.Type)
 		json.NewEncoder(conn).Encode(Verdict{
@@ -272,6 +365,50 @@ func (d *Daemon) handleConn(conn net.Conn) {
 			Reason:  "VibeCop: unknown request type",
 		})
 	}
+}
+
+func handleListPending(conn net.Conn, h listPendingHandler) {
+	resp := PendingResponse{Pending: nil}
+	if h != nil {
+		resp.Pending, resp.AuditEnabled = h()
+	}
+	if resp.Pending == nil {
+		resp.Pending = []PendingEntry{}
+	}
+	json.NewEncoder(conn).Encode(resp)
+}
+
+func handleGetConfig(conn net.Conn, h getConfigHandler) {
+	var resp ConfigResponse
+	if h != nil {
+		resp = h()
+	}
+	json.NewEncoder(conn).Encode(resp)
+}
+
+func handleCompletePending(conn net.Conn, req Request, h completePendingHandler) {
+	if h == nil {
+		json.NewEncoder(conn).Encode(CompleteResponse{
+			OK:    false,
+			Error: "VibeCop: complete_pending handler not registered",
+		})
+		return
+	}
+	if req.Key == "" || req.ProjectHash == "" || req.HumanDecision == "" {
+		json.NewEncoder(conn).Encode(CompleteResponse{
+			OK:    false,
+			Error: "VibeCop: missing key, project_hash, or human_decision",
+		})
+		return
+	}
+	if err := h(req.ProjectHash, req.Key, req.HumanDecision); err != nil {
+		json.NewEncoder(conn).Encode(CompleteResponse{
+			OK:    false,
+			Error: err.Error(),
+		})
+		return
+	}
+	json.NewEncoder(conn).Encode(CompleteResponse{OK: true})
 }
 
 func handlePermission(conn net.Conn, req Request, handler permissionHandler) {
@@ -302,7 +439,7 @@ func handleTUISubscribe(conn net.Conn, d *Daemon) {
 	for evt := range ch {
 		data, err := json.Marshal(evt)
 		if err != nil {
-			continue
+		continue
 		}
 		data = append(data, '\n')
 		if _, err := conn.Write(data); err != nil {
@@ -322,20 +459,20 @@ func (d *Daemon) broadcastEvents(evtCh chan Event) {
 	for evt := range evtCh {
 		d.subsMu.Lock()
 		for ch := range d.subs {
-			select {
+		select {
 			case ch <- evt:
-			default:
+		default:
 				// Drop for slow subscribers.
-			}
+		}
 		}
 		d.subsMu.Unlock()
 
 		if d.otlpCh != nil {
-			select {
+		select {
 			case d.otlpCh <- evt:
-			default:
+		default:
 				// Drop for slow OTLP exporter — fail-open.
-			}
+		}
 		}
 	}
 	if d.otlpCh != nil {
