@@ -1,5 +1,7 @@
 # vibecop
 
+## Claude's auto mode but for any agent -- under your control, and configurable.
+
 **A second AI watches your coding agent so you don't have to.**
 
 You've turned on permission checks in Claude Code or Gemini CLI. You've been approving `bash`, `read_file`, and `write_file` for the last two hours without reading them. You are the rubber stamp. You are the weak link.
