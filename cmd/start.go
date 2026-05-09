@@ -65,6 +65,17 @@ var startCmd = &cobra.Command{
 		var storesMu sync.Mutex
 
 		d.OnPermission(makePermissionHandler(ec, d, tp, cfg.Daemon.ActivityWindow, cfg.Daemon.AuditEnabled, cfg.Model.Model, cfg.Model.APIFormat, stores, loggers, &storesMu))
+		d.OnListPending(makeListPendingHandler(loggers, &storesMu, cfg.Daemon.AuditEnabled))
+		d.OnCompletePending(makeCompletePendingHandler(loggers, &storesMu))
+		d.OnGetConfig(func() daemon.ConfigResponse {
+			return daemon.ConfigResponse{
+				Endpoint:     cfg.Model.Endpoint,
+				APIFormat:    cfg.Model.APIFormat,
+				Model:        cfg.Model.Model,
+				TimeoutMs:    cfg.Daemon.TimeoutMs,
+				AuditEnabled: cfg.Daemon.AuditEnabled,
+			}
+		})
 
 		// Subscribe telemetry log exporter to daemon events. Returns a
 		// WaitGroup we drain after d.Run so logs flush before SDK shutdown.
@@ -284,6 +295,52 @@ func makePermissionHandler(
 			Verdict: verdictStr,
 			Reason:  reasonStr,
 		}
+	}
+}
+
+func makeListPendingHandler(
+	loggers map[string]*audit.Logger,
+	storesMu *sync.Mutex,
+	auditEnabled bool,
+) func() ([]daemon.PendingEntry, bool) {
+	return func() ([]daemon.PendingEntry, bool) {
+		storesMu.Lock()
+		snapshot := make([]*audit.Logger, 0, len(loggers))
+		for _, l := range loggers {
+			snapshot = append(snapshot, l)
+		}
+		storesMu.Unlock()
+
+		var out []daemon.PendingEntry
+		for _, l := range snapshot {
+			for _, p := range l.ListPending() {
+				out = append(out, daemon.PendingEntry{
+					Key:         p.Key,
+					ProjectHash: p.ProjectHash,
+					Timestamp:   p.Timestamp,
+					Tool:        p.Tool,
+					Input:       p.Input,
+					Verdict:     p.Verdict,
+					Reason:      p.Reason,
+				})
+			}
+		}
+		return out, auditEnabled
+	}
+}
+
+func makeCompletePendingHandler(
+	loggers map[string]*audit.Logger,
+	storesMu *sync.Mutex,
+) func(string, string, string) error {
+	return func(projectHash, key, humanDecision string) error {
+		storesMu.Lock()
+		l, ok := loggers[projectHash]
+		storesMu.Unlock()
+		if !ok {
+			return fmt.Errorf("no logger for project %q", projectHash)
+		}
+		return l.CompletePending(key, humanDecision)
 	}
 }
 
