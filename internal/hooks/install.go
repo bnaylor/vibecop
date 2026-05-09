@@ -63,6 +63,52 @@ type geminiHooks struct {
 	BeforeTool string `json:"before_tool,omitempty"`
 }
 
+// --- Codex CLI hooks.json types ---
+//
+// Codex's hooks.json mirrors Claude's settings.json shape under `hooks` —
+// each event is an array of {matcher, hooks: [{type, command}]} entries.
+// Codex registers under PreToolUse AND PermissionRequest because PreToolUse
+// cannot allow.
+
+type codexSettings struct {
+	Hooks *codexHooks `json:"hooks,omitempty"`
+}
+
+type codexHooks struct {
+	PreToolUse        []codexEntry `json:"PreToolUse,omitempty"`
+	PermissionRequest []codexEntry `json:"PermissionRequest,omitempty"`
+}
+
+type codexEntry struct {
+	Matcher string      `json:"matcher"`
+	Hooks   []codexHook `json:"hooks"`
+}
+
+type codexHook struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// --- Copilot CLI settings.json types ---
+//
+// Copilot's settings.json uses a flat array of hook definitions per event,
+// no matcher field, and the command lives under the "bash" key (with an
+// optional "powershell" sibling for cross-platform setups).
+
+type copilotSettings struct {
+	Version int           `json:"version,omitempty"`
+	Hooks   *copilotHooks `json:"hooks,omitempty"`
+}
+
+type copilotHooks struct {
+	PreToolUse []copilotHook `json:"preToolUse,omitempty"`
+}
+
+type copilotHook struct {
+	Type string `json:"type"`
+	Bash string `json:"bash,omitempty"`
+}
+
 // Default paths.
 func claudeSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -80,6 +126,22 @@ func geminiSettingsPath() (string, error) {
 	return filepath.Join(home, ".gemini", "settings.json"), nil
 }
 
+func codexSettingsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codex", "hooks.json"), nil
+}
+
+func copilotSettingsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".copilot", "settings.json"), nil
+}
+
 // InstallHooks adds vibecop hooks to the specified harness's settings.
 // vibecopPath is the path to the vibecop binary the hook should invoke;
 // empty means rely on $PATH (writes "vibecop hook"). A previously installed
@@ -91,6 +153,10 @@ func InstallHooks(harness, vibecopPath string) error {
 		return installClaudeHooks(vibecopPath)
 	case HarnessGemini:
 		return installGeminiHooks(vibecopPath)
+	case HarnessCodex:
+		return installCodexHooks(vibecopPath)
+	case HarnessCopilot:
+		return installCopilotHooks(vibecopPath)
 	default:
 		return fmt.Errorf("unsupported harness: %s", harness)
 	}
@@ -180,6 +246,10 @@ func UninstallHooks(harness string) error {
 		return uninstallClaudeHooks()
 	case HarnessGemini:
 		return uninstallGeminiHooks()
+	case HarnessCodex:
+		return uninstallCodexHooks()
+	case HarnessCopilot:
+		return uninstallCopilotHooks()
 	default:
 		return fmt.Errorf("unsupported harness: %s", harness)
 	}
@@ -246,6 +316,160 @@ func uninstallGeminiHooks() error {
 	}
 
 	delete(raw, "hooks")
+	return writeRawJSON(path, raw)
+}
+
+func installCodexHooks(vibecopPath string) error {
+	path, err := codexSettingsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+
+	raw := readRawJSON(path)
+
+	var hooks codexHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
+	}
+
+	want := hookCommand(vibecopPath)
+
+	hooks.PreToolUse = upsertCodexEntry(hooks.PreToolUse, want)
+	hooks.PermissionRequest = upsertCodexEntry(hooks.PermissionRequest, want)
+
+	raw["hooks"] = hooks
+	return writeRawJSON(path, raw)
+}
+
+// upsertCodexEntry replaces a vibecop hook in entries (matching by command
+// shape) or appends a new one. Returns the updated slice.
+func upsertCodexEntry(entries []codexEntry, want string) []codexEntry {
+	for i, e := range entries {
+		if len(e.Hooks) == 0 {
+			continue
+		}
+		if !isVibecopHookCommand(e.Hooks[0].Command) {
+			continue
+		}
+		entries[i].Hooks[0].Command = want
+		return entries
+	}
+	return append(entries, codexEntry{
+		Matcher: "",
+		Hooks:   []codexHook{{Type: "command", Command: want}},
+	})
+}
+
+func installCopilotHooks(vibecopPath string) error {
+	path, err := copilotSettingsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+
+	raw := readRawJSON(path)
+
+	// Preserve the `version` key explicitly — write it back as 1 if absent
+	// so Copilot can parse the file.
+	if _, ok := raw["version"]; !ok {
+		raw["version"] = 1
+	}
+
+	var hooks copilotHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
+	}
+
+	want := hookCommand(vibecopPath)
+
+	hooks.PreToolUse = upsertCopilotEntry(hooks.PreToolUse, want)
+
+	raw["hooks"] = hooks
+	return writeRawJSON(path, raw)
+}
+
+func upsertCopilotEntry(entries []copilotHook, want string) []copilotHook {
+	for i, e := range entries {
+		if !isVibecopHookCommand(e.Bash) {
+			continue
+		}
+		entries[i].Bash = want
+		return entries
+	}
+	return append(entries, copilotHook{Type: "command", Bash: want})
+}
+
+func uninstallCodexHooks() error {
+	path, err := codexSettingsPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+
+	raw := readRawJSON(path)
+
+	var hooks codexHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
+	}
+
+	hooks.PreToolUse = removeVibecopCodexEntries(hooks.PreToolUse)
+	hooks.PermissionRequest = removeVibecopCodexEntries(hooks.PermissionRequest)
+
+	if len(hooks.PreToolUse) == 0 && len(hooks.PermissionRequest) == 0 {
+		delete(raw, "hooks")
+	} else {
+		raw["hooks"] = hooks
+	}
+	return writeRawJSON(path, raw)
+}
+
+func removeVibecopCodexEntries(entries []codexEntry) []codexEntry {
+	return slices.DeleteFunc(entries, func(e codexEntry) bool {
+		return len(e.Hooks) > 0 && isVibecopHookCommand(e.Hooks[0].Command)
+	})
+}
+
+func uninstallCopilotHooks() error {
+	path, err := copilotSettingsPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+
+	raw := readRawJSON(path)
+
+	var hooks copilotHooks
+	if raw["hooks"] != nil {
+		if b, err := json.Marshal(raw["hooks"]); err == nil {
+			json.Unmarshal(b, &hooks) //nolint:errcheck
+		}
+	}
+
+	hooks.PreToolUse = slices.DeleteFunc(hooks.PreToolUse, func(h copilotHook) bool {
+		return isVibecopHookCommand(h.Bash)
+	})
+
+	if len(hooks.PreToolUse) == 0 {
+		delete(raw, "hooks")
+	} else {
+		raw["hooks"] = hooks
+	}
 	return writeRawJSON(path, raw)
 }
 

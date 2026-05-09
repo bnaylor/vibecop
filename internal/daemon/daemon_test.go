@@ -214,3 +214,77 @@ func TestDefaultSocketPath(t *testing.T) {
 		t.Errorf("unexpected path: %s", path)
 	}
 }
+
+func TestRequestHarnessAndHookEventRoundTrip(t *testing.T) {
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
+	cfg := config.DefaultConfig()
+	d := New(socketPath, cfg)
+
+	got := make(chan Request, 1)
+	d.OnPermission(func(req Request) Verdict {
+		got <- req
+		return Verdict{Verdict: "approve"}
+	})
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(Request{
+		Type:      TypePermissionRequest,
+		Tool:      "Bash",
+		Input:     "go test",
+		Harness:   "codex",
+		HookEvent: "PermissionRequest",
+	})
+
+	var resp Verdict
+	json.NewDecoder(conn).Decode(&resp)
+
+	select {
+	case r := <-got:
+		if r.Harness != "codex" {
+			t.Errorf("Harness = %q, want codex", r.Harness)
+		}
+		if r.HookEvent != "PermissionRequest" {
+			t.Errorf("HookEvent = %q, want PermissionRequest", r.HookEvent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler not invoked")
+	}
+}
+
+func TestEventHarnessAndHookEventRoundTrip(t *testing.T) {
+	d, socketPath := newTestDaemon(t)
+	defer d.Stop()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	json.NewEncoder(conn).Encode(Request{Type: TypeTUISubscribe})
+	time.Sleep(50 * time.Millisecond)
+
+	d.EmitEvent(Event{
+		Tool:      "Bash",
+		Verdict:   "approve",
+		Harness:   "claude",
+		HookEvent: "PreToolUse",
+	})
+
+	var evt Event
+	if err := json.NewDecoder(conn).Decode(&evt); err != nil {
+		t.Fatal(err)
+	}
+	if evt.Harness != "claude" || evt.HookEvent != "PreToolUse" {
+		t.Errorf("Event lost harness fields: %#v", evt)
+	}
+}

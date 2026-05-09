@@ -35,24 +35,32 @@ func newMetrics(m metric.Meter) (*Metrics, error) {
 }
 
 // RecordVerdict increments the verdict counter for one permission check.
-// Safe on a nil receiver.
-func (p *Provider) RecordVerdict(ctx context.Context, verdict, tool string) {
+// Safe on a nil receiver. Empty harness is dropped from the label set.
+func (p *Provider) RecordVerdict(ctx context.Context, verdict, tool, harness string) {
 	if p == nil || p.metrics == nil {
 		return
 	}
-	p.metrics.verdicts.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("vibecop.verdict", verdict),
 		attribute.String("vibecop.tool", tool),
-	))
+	}
+	if harness != "" {
+		attrs = append(attrs, attribute.String("vibecop.harness", harness))
+	}
+	p.metrics.verdicts.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordEvaluatorLatency records the LLM round-trip latency in milliseconds.
-// Safe on a nil receiver.
-func (p *Provider) RecordEvaluatorLatency(ctx context.Context, latencyMs int64, verdict string) {
+// Safe on a nil receiver. Empty harness is dropped from the label set.
+func (p *Provider) RecordEvaluatorLatency(ctx context.Context, latencyMs int64, verdict, harness string) {
 	if p == nil || p.metrics == nil {
 		return
 	}
-	p.metrics.latency.Record(ctx, latencyMs, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("vibecop.verdict", verdict),
-	))
+	}
+	if harness != "" {
+		attrs = append(attrs, attribute.String("vibecop.harness", harness))
+	}
+	p.metrics.latency.Record(ctx, latencyMs, metric.WithAttributes(attrs...))
 }

@@ -30,6 +30,8 @@ type Request struct {
 	Tool        string `json:"tool,omitempty"`
 	Input       string `json:"input,omitempty"`
 	SessionID   string `json:"session_id,omitempty"`
+	Harness     string `json:"harness,omitempty"`
+	HookEvent   string `json:"hook_event,omitempty"`
 }
 
 // Verdict returned to a hook.
@@ -48,6 +50,8 @@ type Event struct {
 	Timestamp string `json:"timestamp,omitempty"`
 	Level     string `json:"level,omitempty"` // "info", "warn", "error"
 	Message   string `json:"message,omitempty"`
+	Harness   string `json:"harness,omitempty"`
+	HookEvent string `json:"hook_event,omitempty"`
 }
 
 // permissionHandler is called when a permission_request arrives.

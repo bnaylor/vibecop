@@ -19,7 +19,8 @@ var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install hook scripts into coding harness configs",
 	Long: `Install vibecop hook scripts into the specified harness.
-Use --harness to target one (claude, gemini) or --all for all supported harnesses.
+Use --harness to target one (claude, gemini, codex, copilot) or --all for all
+supported harnesses.
 
 By default the hook calls "vibecop hook" and relies on $PATH to find it. Pass
 --vibecop-path to point the hook at a specific binary instead — useful when
@@ -66,14 +67,19 @@ func resolveInstallTargets() []string {
 		return []string{installHarness}
 	}
 	if installAll {
-		return []string{hooks.HarnessClaude, hooks.HarnessGemini}
+		return []string{
+			hooks.HarnessClaude,
+			hooks.HarnessGemini,
+			hooks.HarnessCodex,
+			hooks.HarnessCopilot,
+		}
 	}
 	return nil
 }
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-	installCmd.Flags().StringVar(&installHarness, "harness", "", "Harness to install into (claude|gemini) — use 'claude' for any claude-compatible wrapper")
+	installCmd.Flags().StringVar(&installHarness, "harness", "", "Harness to install into (claude|gemini|codex|copilot) — use 'claude' for any claude-compatible wrapper")
 	installCmd.Flags().BoolVar(&installAll, "all", false, "Install into all supported harnesses")
 	installCmd.Flags().StringVar(&installVibecopPath, "vibecop-path", "", "Path to a specific vibecop binary the hook should call (default: 'vibecop' via $PATH). Resolved to absolute.")
 }

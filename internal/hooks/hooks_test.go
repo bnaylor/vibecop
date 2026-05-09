@@ -28,6 +28,27 @@ func TestDetectClaudeCode(t *testing.T) {
 	if nr.ProjectPath != "/Users/test/src/my-project" {
 		t.Errorf("expected /Users/test/src/my-project, got %s", nr.ProjectPath)
 	}
+	if nr.Event != EventPreToolUse {
+		t.Errorf("expected default event %s, got %s", EventPreToolUse, nr.Event)
+	}
+}
+
+func TestDetectClaudeCodeWithExplicitEvent(t *testing.T) {
+	input := `{
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash",
+		"tool_input": { "command": "go test" }
+	}`
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessClaude {
+		t.Errorf("expected claude, got %s", harness)
+	}
+	if nr.Event != EventPreToolUse {
+		t.Errorf("expected event PreToolUse, got %s", nr.Event)
+	}
 }
 
 func TestDetectClaudeCodeRead(t *testing.T) {
@@ -134,5 +155,124 @@ func TestInputSummary(t *testing.T) {
 	nr := &NormalizedRequest{Input: "line1\nline2\nline3"}
 	if s := nr.InputSummary(); s != "line1" {
 		t.Errorf("expected 'line1', got %s", s)
+	}
+}
+
+func TestDetectCodexPreToolUse(t *testing.T) {
+	input := `{
+		"hook_event_name": "PreToolUse",
+		"session_id": "sess-1",
+		"transcript_path": "/tmp/t.json",
+		"cwd": "/Users/test/src/codex-proj",
+		"model": "gpt-5",
+		"turn_id": "turn-1",
+		"tool_name": "Bash",
+		"tool_use_id": "use-1",
+		"tool_input": { "command": "ls" }
+	}`
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessCodex {
+		t.Errorf("expected codex harness, got %s", harness)
+	}
+	if nr.Event != EventPreToolUse {
+		t.Errorf("expected event PreToolUse, got %s", nr.Event)
+	}
+	if nr.Tool != "Bash" || nr.Input != "ls" {
+		t.Errorf("unexpected normalization: tool=%q input=%q", nr.Tool, nr.Input)
+	}
+	if nr.ProjectPath != "/Users/test/src/codex-proj" {
+		t.Errorf("expected cwd as project path, got %s", nr.ProjectPath)
+	}
+}
+
+func TestDetectCodexPermissionRequest(t *testing.T) {
+	input := `{
+		"hook_event_name": "PermissionRequest",
+		"session_id": "sess-1",
+		"cwd": "/proj",
+		"tool_name": "Bash",
+		"tool_input": { "command": "rm -rf /", "description": "danger" }
+	}`
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessCodex {
+		t.Errorf("expected codex, got %s", harness)
+	}
+	if nr.Event != EventPermissionRequest {
+		t.Errorf("expected PermissionRequest, got %s", nr.Event)
+	}
+}
+
+func TestDetectCopilot(t *testing.T) {
+	input := `{
+		"timestamp": 1704614600000,
+		"cwd": "/path/to/project",
+		"toolName": "bash",
+		"toolArgs": "{\"command\":\"rm -rf dist\"}"
+	}`
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessCopilot {
+		t.Errorf("expected copilot, got %s", harness)
+	}
+	if nr.Event != EventCopilotPreToolUse {
+		t.Errorf("expected event preToolUse, got %s", nr.Event)
+	}
+	if nr.Tool != "bash" {
+		t.Errorf("expected tool bash, got %s", nr.Tool)
+	}
+	if nr.Input != "rm -rf dist" {
+		t.Errorf("expected unmarshalled command, got %q", nr.Input)
+	}
+	if nr.ProjectPath != "/path/to/project" {
+		t.Errorf("expected /path/to/project, got %s", nr.ProjectPath)
+	}
+}
+
+func TestDetectCopilotMalformedToolArgs(t *testing.T) {
+	input := `{
+		"toolName": "bash",
+		"toolArgs": "not-json-at-all"
+	}`
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessCopilot {
+		t.Errorf("expected copilot, got %s", harness)
+	}
+	if nr.Input != "not-json-at-all" {
+		t.Errorf("expected raw fallback, got %q", nr.Input)
+	}
+}
+
+func TestDetectGeminiSetsBeforeToolEvent(t *testing.T) {
+	input := `{ "tool": "Bash", "input": "go test ./..." }`
+	nr, _, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nr.Event != EventBeforeTool {
+		t.Errorf("expected default BeforeTool, got %s", nr.Event)
+	}
+}
+
+func TestParseWithFormatCodexMissingEvent(t *testing.T) {
+	// Codex always sends hook_event_name, but if it's missing we fall to
+	// the PreToolUse default rather than fail.
+	input := `{ "tool_name": "Bash", "tool_input": { "command": "go test" } }`
+	nr, _, err := DetectAndParse(strings.NewReader(input), HarnessCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nr.Event != EventPreToolUse {
+		t.Errorf("expected PreToolUse fallback, got %s", nr.Event)
 	}
 }

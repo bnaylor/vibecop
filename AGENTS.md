@@ -45,7 +45,7 @@ These are load-bearing. Spec sections in parentheses.
 
 1. **Fail-open everywhere** ("Failure Handling"). If anything in vibecop's own code fails — bad config, daemon down, parse error, LLM 500 — the hook MUST exit 0 so the user's coding agent is never blocked. The one exception: a *successful* `deny` or `escalate` verdict from the LLM exits 1.
 2. **Three consecutive evaluator failures → suspended pass-through** for the rest of the daemon's life (`cmd/start.go`, `maxConsecutiveFailures`). Resume requires `vibecop test` (or restart). Do not change this without updating spec + test (`cmd/handler_test.go`).
-3. **Exit-code contract** ("Exit code contract" table). `approve→0`, `deny→1`, `escalate→1`, timeout→1, daemon unreachable→0. Stderr text is part of the contract — Claude Code and Gemini CLI display it to the user.
+3. **Per-harness JSON response contract** ("Verdict → harness response contract" / "Per-harness JSON shapes" tables). `vibecop hook` always exits 0 — the harness keys off the JSON written to stdout. `approve` emits harness-native "allow" JSON; `deny` emits harness-native "deny" JSON plus `VibeCop [DENY]: <reason>` on stderr; `escalate` emits no JSON and lets the harness's normal flow run. Fail-open paths (parse error, daemon unreachable, unknown harness/event/verdict, marshal failure) emit no JSON and exit 0. The `[DENY]` / `[ESCALATE]` stderr line is gated on the JSON-shaping success path — never written when we couldn't actually emit the deny.
 4. **Project identity = SHA256 of absolute path** (`config.ProjectHash`). Do not hash the basename, do not normalize symlinks. Per-project storage at `~/.vibecop/projects/<hash>/`.
 5. **Activity log is ephemeral, audit log is permanent.** `activity.jsonl` is a rolling window of last `activity_window` verdicts (default 10) used as LLM context. `audit/YYYY-MM-DD.jsonl` is the permanent record, only written when `audit_enabled = true`. Never read audit logs back into prompts.
 6. **`think: false` for Ollama CoT models.** Local endpoints with reasoning models (`qwen3`, `deepseek-r1`) need this in the request body to avoid 30s+ latencies. The injection lives in `internal/evaluator/`.
@@ -66,12 +66,13 @@ These are load-bearing. Spec sections in parentheses.
 
 ## Adding a new harness (e.g. Deepseek)
 
-1. Add a payload struct + parser in `internal/hooks/hooks.go` (mirror `ClaudeCodePayload` / `GeminiCLIPayload`).
-2. Extend `DetectAndParse` and `parseWithFormat`.
-3. Add subprocess invocation in `internal/evaluator/init.go` for the Guardian-prompt generation step.
-4. Add idempotent settings-file patching in `internal/hooks/install.go`.
-5. Update spec.md, README.md, this file, and `cmd/install.go`'s `--harness` enum.
-6. Tests: payload parsing, install/uninstall round-trip.
+1. Add a payload struct + parser in `internal/hooks/hooks.go` (mirror `ClaudeCodePayload` / `GeminiCLIPayload` / `CodexPayload` / `CopilotPayload`).
+2. Extend `DetectAndParse`, `parseWithFormat`, and `defaultEventFor`.
+3. Add the harness's row to `WriteVerdict` in `internal/hooks/responder.go` for each `(event, verdict)` combination, plus table-test coverage in `responder_test.go`.
+4. Add subprocess invocation in `internal/evaluator/init.go` for the Guardian-prompt generation step.
+5. Add idempotent settings-file patching in `internal/hooks/install.go`.
+6. Update spec.md, README.md, this file, and `cmd/install.go`'s `--harness` enum.
+7. Tests: payload parsing, responder rows, install/uninstall round-trip.
 
 ## Adding a new LLM provider
 

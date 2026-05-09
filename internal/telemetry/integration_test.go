@@ -45,7 +45,7 @@ func newProviderWithRecorders(t *testing.T) (*Provider, *tracetest.SpanRecorder,
 func TestProviderRecordsSpanAndMetrics(t *testing.T) {
 	p, sr, reader := newProviderWithRecorders(t)
 
-	ctx, root := p.StartPermissionSpan(context.Background(), "Bash", "abcd1234")
+	ctx, root := p.StartPermissionSpan(context.Background(), "Bash", "abcd1234", "claude", "PreToolUse")
 	_, eval := p.StartEvaluatorSpan(ctx, "test-model", "anthropic")
 	eval.End()
 	root.SetAttributes(
@@ -53,8 +53,8 @@ func TestProviderRecordsSpanAndMetrics(t *testing.T) {
 		attribute.Int64("vibecop.latency_ms", 42),
 	)
 	root.SetStatus(codes.Error, "blocked: rm -rf")
-	p.RecordVerdict(ctx, "deny", "Bash")
-	p.RecordEvaluatorLatency(ctx, 42, "deny")
+	p.RecordVerdict(ctx, "deny", "Bash", "claude")
+	p.RecordEvaluatorLatency(ctx, 42, "deny", "claude")
 	root.End()
 
 	// --- spans ---
@@ -85,6 +85,12 @@ func TestProviderRecordsSpanAndMetrics(t *testing.T) {
 	}
 	if got := attrString(rootSpan, "vibecop.verdict"); got != "deny" {
 		t.Errorf("root vibecop.verdict: got %q, want deny", got)
+	}
+	if got := attrString(rootSpan, "vibecop.harness"); got != "claude" {
+		t.Errorf("root vibecop.harness: got %q, want claude", got)
+	}
+	if got := attrString(rootSpan, "vibecop.hook_event"); got != "PreToolUse" {
+		t.Errorf("root vibecop.hook_event: got %q, want PreToolUse", got)
 	}
 	if rootSpan.Parent().IsValid() {
 		t.Error("root span unexpectedly has a parent")

@@ -124,7 +124,7 @@ func makePermissionHandler(
 		failMu.Unlock()
 
 		if isSuspended {
-			tp.RecordVerdict(context.Background(), "approve", req.Tool)
+			tp.RecordVerdict(context.Background(), "approve", req.Tool, req.Harness)
 			d.EmitEvent(daemon.Event{
 				Tool:      req.Tool,
 				Input:     req.Input,
@@ -133,13 +133,15 @@ func makePermissionHandler(
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 				Level:     "warn",
 				Message:   "VibeCop suspended after repeated failures — pass-through mode",
+				Harness:   req.Harness,
+				HookEvent: req.HookEvent,
 			})
 			return daemon.Verdict{Verdict: "approve"}
 		}
 
 		projectHash := config.ProjectHash(req.ProjectPath)
 
-		spanCtx, rootSpan := tp.StartPermissionSpan(context.Background(), req.Tool, projectHash)
+		spanCtx, rootSpan := tp.StartPermissionSpan(context.Background(), req.Tool, projectHash, req.Harness, req.HookEvent)
 		defer rootSpan.End()
 
 		// Get or create per-project activity store and audit logger.
@@ -162,7 +164,7 @@ func makePermissionHandler(
 			log.Printf("evaluator: prompt resolution error: %v", err)
 			rootSpan.SetStatus(codes.Error, "prompt resolution failed")
 			rootSpan.RecordError(err)
-			tp.RecordVerdict(spanCtx, "escalate", req.Tool)
+			tp.RecordVerdict(spanCtx, "escalate", req.Tool, req.Harness)
 			return daemon.Verdict{
 				Verdict: "escalate",
 				Reason:  "VibeCop: failed to load configuration",
@@ -259,6 +261,8 @@ func makePermissionHandler(
 			Reason:    reasonStr,
 			LatencyMs: latencyMs,
 			Timestamp: now.Format(time.RFC3339),
+			Harness:   req.Harness,
+			HookEvent: req.HookEvent,
 		})
 
 		// Telemetry — annotate root span and record metrics.
@@ -277,8 +281,8 @@ func makePermissionHandler(
 		if verdictStr == "deny" || verdictStr == "error" {
 			rootSpan.SetStatus(codes.Error, reasonStr)
 		}
-		tp.RecordVerdict(spanCtx, verdictStr, req.Tool)
-		tp.RecordEvaluatorLatency(spanCtx, latencyMs, verdictStr)
+		tp.RecordVerdict(spanCtx, verdictStr, req.Tool, req.Harness)
+		tp.RecordEvaluatorLatency(spanCtx, latencyMs, verdictStr, req.Harness)
 
 		return daemon.Verdict{
 			Verdict: verdictStr,

@@ -158,7 +158,7 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 
 ### Hook scripts
 
-`vibecop install` writes thin wrapper scripts that delegate entirely to `vibecop hook`:
+`vibecop install` writes thin wrapper config that delegates entirely to `vibecop hook`:
 
 **Claude Code** (`~/.claude/settings.json` — adds a `PreToolUse` hook):
 ```json
@@ -174,6 +174,20 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 }
 ```
 
+**Codex CLI** (`~/.codex/hooks.json` — registers under both `PreToolUse` and `PermissionRequest`; PreToolUse cannot allow on Codex, so PermissionRequest is the only event that can silently approve):
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "vibecop hook" }] }
+    ],
+    "PermissionRequest": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "vibecop hook" }] }
+    ]
+  }
+}
+```
+
 **Gemini CLI** (`~/.gemini/settings.json` — equivalent hook config):
 ```json
 {
@@ -183,19 +197,53 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 }
 ```
 
-`vibecop hook` reads the harness's JSON payload from stdin, normalizes it to the IPC request format, sends it to the daemon socket, and exits according to the exit code contract. The harness is auto-detected from the input payload shape; it can also be overridden with `--harness`.
+**Copilot CLI** (`~/.copilot/settings.json` — flat array of hook definitions, command lives under `bash`):
+```json
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      { "type": "command", "bash": "vibecop hook" }
+    ]
+  }
+}
+```
 
-### Exit code contract
+`vibecop hook` reads the harness's JSON payload from stdin, normalizes it to the IPC request format, sends it to the daemon socket, and emits the harness-native JSON response on stdout. The harness is auto-detected from the input payload shape; it can also be overridden with `--harness {claude|gemini|codex|copilot}`.
 
-| Verdict | Exit code | Stderr |
-|---|---|---|
-| `approve` | `0` | silent |
-| `deny` | `1` | `VibeCop [DENY]: <reason>` |
-| `escalate` | `1` | `VibeCop [ESCALATE]: <reason>` |
-| timeout | `1` | `VibeCop: timed out after <N>ms — escalating` |
-| daemon unreachable | `0` | silent (fail-open) |
+### Verdict → harness response contract
 
-Non-zero exit causes the coding harness to surface its own native permission prompt. The stderr text is displayed to the user as context. The human always has final say — `deny` is a strong recommendation, not a unilateral block.
+`vibecop hook` always exits 0 — the JSON it writes to stdout is what the harness keys off. The exit code is reserved for fail-open: a parse error, a marshal failure, an unrecognized harness/event, or an unknown verdict all produce no stdout and exit 0 with a single-line stderr diagnostic.
+
+| Verdict    | Behavior                                                                                                                                                 |
+|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `approve`  | Emit harness-native "allow" JSON. Skips the harness's user prompt.                                                                                       |
+| `deny`     | Emit harness-native "deny" JSON. Tool is blocked. Stderr `VibeCop [DENY]: <reason>` is preserved for operator visibility.                                |
+| `escalate` | Emit no JSON. The harness's normal permission flow runs (typically prompts the user). Stderr `VibeCop [ESCALATE]: <reason>` is preserved when reason is non-empty. |
+
+`escalate` deliberately does not map to a harness's "ask" decision: vibecop's preference is "no objection, defer to whatever the harness would have done" rather than forcing a prompt the harness might otherwise have skipped under a user-defined rule.
+
+#### Per-harness JSON shapes
+
+Reason fields are omitted when the daemon's reason is empty.
+
+| (harness, event)             | `approve`                                                                                                              | `deny`                                                                                                                       |
+|------------------------------|------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `claude`, `PreToolUse`       | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"…"}}`    | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`           |
+| `codex`, `PreToolUse`        | (no stdout — Codex `PreToolUse` cannot allow; `PermissionRequest` is the approval channel)                             | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`           |
+| `codex`, `PermissionRequest` | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`                         | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"…"}}}`                  |
+| `gemini`, `BeforeTool`       | `{"decision":"allow","reason":"…"}`                                                                                    | `{"decision":"deny","reason":"…"}`                                                                                           |
+| `copilot`, `preToolUse`      | `{"permissionDecision":"allow"}`                                                                                       | `{"permissionDecision":"deny","permissionDecisionReason":"…"}`                                                               |
+
+### Failure modes
+
+- **Daemon unreachable** — hook exits 0 silently (no stdout, no JSON).
+- **Unparseable stdin** — fail-open: stderr diagnostic, exit 0.
+- **JSON marshal failure in `WriteVerdict`** — fail-open: no stdout, exit 0.
+- **Unknown `(harness, event)` or unknown verdict** — fail-open: no stdout, single-line stderr diagnostic, exit 0. The `[DENY]` / `[ESCALATE]` stderr line is suppressed in this case so the operator's terminal isn't lying about a block that didn't happen.
+- **Three-consecutive evaluator failures** — daemon-side suspension (unchanged from "Failure Handling" below); the hook still emits per-harness responses, just always `approve`.
+
+The human always has final say. `deny` is a strong recommendation that the harness can override (e.g. Claude Code's "approve anyway" affordance after seeing the deny reason).
 
 ### TUI
 

@@ -21,13 +21,21 @@ func (p *Provider) Tracer() trace.Tracer {
 // StartPermissionSpan opens the root span for one permission check. The caller
 // MUST End() the returned span. Tool name and project hash are recorded as
 // attributes; verdict, reason, and latency are recorded later via SetAttributes.
-func (p *Provider) StartPermissionSpan(ctx context.Context, tool, projectHash string) (context.Context, trace.Span) {
+// Harness and hook event are optional — empty strings are dropped from the span.
+func (p *Provider) StartPermissionSpan(ctx context.Context, tool, projectHash, harness, hookEvent string) (context.Context, trace.Span) {
+	attrs := []attribute.KeyValue{
+		attribute.String("vibecop.tool", tool),
+		attribute.String("vibecop.project_hash", projectHash),
+	}
+	if harness != "" {
+		attrs = append(attrs, attribute.String("vibecop.harness", harness))
+	}
+	if hookEvent != "" {
+		attrs = append(attrs, attribute.String("vibecop.hook_event", hookEvent))
+	}
 	return p.Tracer().Start(ctx, "permission.check",
 		trace.WithSpanKind(trace.SpanKindServer),
-		trace.WithAttributes(
-			attribute.String("vibecop.tool", tool),
-			attribute.String("vibecop.project_hash", projectHash),
-		),
+		trace.WithAttributes(attrs...),
 	)
 }
 

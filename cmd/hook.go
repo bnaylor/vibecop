@@ -21,78 +21,67 @@ var hookCmd = &cobra.Command{
 	Use:   "hook",
 	Short: "Hook entry point (called by installed scripts)",
 	Long: `Reads a harness permission request from stdin, sends it to the daemon,
-and exits with the verdict code (0 = approve, 1 = deny/escalate).
+and emits the harness-native JSON response on stdout.
 
-Auto-detects the harness format (Claude Code or Gemini CLI) from the
-payload shape. Override with --harness.
+Auto-detects the harness format (Claude Code, Codex, Gemini CLI, or Copilot
+CLI) from the payload shape. Override with --harness.
 
 If the daemon is unreachable, exits 0 silently (fail-open).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Parse the harness payload from stdin.
 		nr, detected, err := hooks.DetectAndParse(os.Stdin, hookHarness)
 		if err != nil {
-			// If we can't parse the payload, fail-open.
+			// Fail-open: can't parse the payload, no JSON, exit 0.
 			fmt.Fprintf(os.Stderr, "VibeCop: %v\n", err)
-			os.Exit(1)
+			os.Exit(0)
 		}
 
-		_ = detected // harness identity available for logging if needed
-
-		// Build the daemon request.
+		// Build the daemon request, including which harness/event we saw so
+		// the evaluator's telemetry and audit log can record them.
 		req := daemon.Request{
 			Type:        daemon.TypePermissionRequest,
 			ProjectPath: nr.ProjectPathResolved(),
 			Tool:        nr.Tool,
 			Input:       nr.Input,
+			Harness:     detected,
+			HookEvent:   nr.Event,
 		}
 
 		// Connect to the daemon.
 		vibecopDir, err := config.VibecopDir()
 		if err != nil {
-			// Can't determine socket path — fail-open.
-			os.Exit(0)
+			os.Exit(0) // fail-open
 		}
 		socketPath := daemon.DefaultSocketPath(vibecopDir)
 
 		conn, err := net.DialTimeout("unix", socketPath, hookTimeout)
 		if err != nil {
-			// Daemon unreachable — fail-open, exit 0 silently.
+			// Daemon unreachable — fail-open, no JSON, exit 0.
 			os.Exit(0)
 		}
 		defer conn.Close()
 
-		// Send the request.
 		if err := json.NewEncoder(conn).Encode(req); err != nil {
-			// Send failed — fail-open.
 			os.Exit(0)
 		}
 
-		// Read the verdict.
 		var resp daemon.Verdict
 		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-			// No response — fail-open.
 			os.Exit(0)
 		}
 
-		// Apply the exit code contract.
-		switch resp.Verdict {
-		case "approve":
-			os.Exit(0)
-		case "deny":
-			fmt.Fprintf(os.Stderr, "VibeCop [DENY]: %s\n", resp.Reason)
-			os.Exit(1)
-		case "escalate":
-			fmt.Fprintf(os.Stderr, "VibeCop [ESCALATE]: %s\n", resp.Reason)
-			os.Exit(1)
-		default:
-			// Unknown verdict — fail-open.
-			os.Exit(0)
+		// Treat daemon-reported "error" as escalate for harness output: the
+		// evaluator failed but vibecop wants the harness's normal flow to run.
+		if resp.Verdict == "error" {
+			resp.Verdict = "escalate"
 		}
+
+		os.Exit(hooks.WriteVerdict(detected, nr.Event, resp, os.Stdout, os.Stderr))
 		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(hookCmd)
-	hookCmd.Flags().StringVar(&hookHarness, "harness", "", "Harness format override (claude|gemini)")
+	hookCmd.Flags().StringVar(&hookHarness, "harness", "", "Harness format override (claude|gemini|codex|copilot)")
 }

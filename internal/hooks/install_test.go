@@ -514,3 +514,346 @@ func TestUninstallGeminiHooksRemovesCustomPath(t *testing.T) {
 		}
 	}
 }
+
+// --- Codex install/uninstall ---
+
+func TestInstallCodexHooksRegistersBothEvents(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpHome, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg codexSettings
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Hooks == nil {
+		t.Fatal("expected hooks block")
+	}
+	if len(cfg.Hooks.PreToolUse) != 1 {
+		t.Errorf("PreToolUse: expected 1 entry, got %d", len(cfg.Hooks.PreToolUse))
+	}
+	if len(cfg.Hooks.PermissionRequest) != 1 {
+		t.Errorf("PermissionRequest: expected 1 entry, got %d", len(cfg.Hooks.PermissionRequest))
+	}
+	for _, ev := range []string{"PreToolUse", "PermissionRequest"} {
+		var entries []codexEntry
+		switch ev {
+		case "PreToolUse":
+			entries = cfg.Hooks.PreToolUse
+		case "PermissionRequest":
+			entries = cfg.Hooks.PermissionRequest
+		}
+		if len(entries) == 0 || len(entries[0].Hooks) == 0 {
+			t.Fatalf("%s: missing hook entry", ev)
+		}
+		if entries[0].Hooks[0].Command != "vibecop hook" {
+			t.Errorf("%s: command = %q", ev, entries[0].Hooks[0].Command)
+		}
+	}
+}
+
+func TestInstallCodexHooksIdempotent(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmpHome, ".codex", "hooks.json"))
+	var cfg codexSettings
+	json.Unmarshal(data, &cfg)
+	if len(cfg.Hooks.PreToolUse) != 1 || len(cfg.Hooks.PermissionRequest) != 1 {
+		t.Errorf("expected one entry per event after two installs; got pre=%d perm=%d",
+			len(cfg.Hooks.PreToolUse), len(cfg.Hooks.PermissionRequest))
+	}
+}
+
+func TestInstallCodexHooksReplacesOnPathChange(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+	custom := "/Users/me/build/vibecop"
+	if err := InstallHooks(HarnessCodex, custom); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmpHome, ".codex", "hooks.json"))
+	var cfg codexSettings
+	json.Unmarshal(data, &cfg)
+	want := custom + " hook"
+	for _, ev := range [][]codexEntry{cfg.Hooks.PreToolUse, cfg.Hooks.PermissionRequest} {
+		if len(ev) != 1 {
+			t.Errorf("expected single entry after replace, got %d", len(ev))
+			continue
+		}
+		if ev[0].Hooks[0].Command != want {
+			t.Errorf("command = %q, want %q", ev[0].Hooks[0].Command, want)
+		}
+	}
+}
+
+func TestUninstallCodexHooks(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := UninstallHooks(HarnessCodex); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmpHome, ".codex", "hooks.json"))
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["hooks"]; ok {
+		var cfg codexSettings
+		json.Unmarshal(data, &cfg)
+		if cfg.Hooks != nil && (len(cfg.Hooks.PreToolUse) > 0 || len(cfg.Hooks.PermissionRequest) > 0) {
+			t.Errorf("entries remained after uninstall: pre=%d perm=%d",
+				len(cfg.Hooks.PreToolUse), len(cfg.Hooks.PermissionRequest))
+		}
+	}
+}
+
+func TestInstallCodexPreservesExtraKeys(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	codexDir := filepath.Join(tmpHome, ".codex")
+	os.MkdirAll(codexDir, 0755)
+	existing := `{"trustedProjects":["~/work"],"someOtherKey":42}`
+	os.WriteFile(filepath.Join(codexDir, "hooks.json"), []byte(existing), 0644)
+
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(codexDir, "hooks.json"))
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["trustedProjects"]; !ok {
+		t.Errorf("trustedProjects was lost: got %v", raw)
+	}
+	if raw["someOtherKey"] != float64(42) {
+		t.Errorf("someOtherKey was lost: got %v", raw["someOtherKey"])
+	}
+}
+
+func TestInstallCodexCoexistsWithExistingHooks(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	codexDir := filepath.Join(tmpHome, ".codex")
+	os.MkdirAll(codexDir, 0755)
+
+	existing := map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []map[string]any{
+				{
+					"matcher": "Bash",
+					"hooks": []map[string]any{
+						{"type": "command", "command": "/usr/bin/policy-check"},
+					},
+				},
+			},
+		},
+	}
+	data, _ := json.MarshalIndent(existing, "", "  ")
+	os.WriteFile(filepath.Join(codexDir, "hooks.json"), data, 0644)
+
+	if err := InstallHooks(HarnessCodex, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := os.ReadFile(filepath.Join(codexDir, "hooks.json"))
+	var cfg codexSettings
+	json.Unmarshal(out, &cfg)
+	if len(cfg.Hooks.PreToolUse) != 2 {
+		t.Errorf("expected 2 PreToolUse entries (existing + vibecop), got %d", len(cfg.Hooks.PreToolUse))
+	}
+	if len(cfg.Hooks.PermissionRequest) != 1 {
+		t.Errorf("expected 1 PermissionRequest entry, got %d", len(cfg.Hooks.PermissionRequest))
+	}
+}
+
+// --- Copilot install/uninstall ---
+
+func TestInstallCopilotHooks(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCopilot, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpHome, ".copilot", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg copilotSettings
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Version != 1 {
+		t.Errorf("expected version=1, got %d", cfg.Version)
+	}
+	if cfg.Hooks == nil || len(cfg.Hooks.PreToolUse) != 1 {
+		t.Fatalf("expected one preToolUse hook, got %#v", cfg.Hooks)
+	}
+	got := cfg.Hooks.PreToolUse[0]
+	if got.Type != "command" || got.Bash != "vibecop hook" {
+		t.Errorf("unexpected hook entry: %#v", got)
+	}
+}
+
+func TestInstallCopilotHooksIdempotent(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCopilot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooks(HarnessCopilot, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmpHome, ".copilot", "settings.json"))
+	var cfg copilotSettings
+	json.Unmarshal(data, &cfg)
+	if len(cfg.Hooks.PreToolUse) != 1 {
+		t.Errorf("expected 1 entry after two installs, got %d", len(cfg.Hooks.PreToolUse))
+	}
+}
+
+func TestInstallCopilotHooksReplacesOnPathChange(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCopilot, ""); err != nil {
+		t.Fatal(err)
+	}
+	custom := "/opt/vibecop"
+	if err := InstallHooks(HarnessCopilot, custom); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmpHome, ".copilot", "settings.json"))
+	var cfg copilotSettings
+	json.Unmarshal(data, &cfg)
+	want := custom + " hook"
+	if len(cfg.Hooks.PreToolUse) != 1 || cfg.Hooks.PreToolUse[0].Bash != want {
+		t.Errorf("expected single entry with bash=%q, got %#v", want, cfg.Hooks.PreToolUse)
+	}
+}
+
+func TestUninstallCopilotHooks(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	if err := InstallHooks(HarnessCopilot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := UninstallHooks(HarnessCopilot); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmpHome, ".copilot", "settings.json"))
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["hooks"]; ok {
+		var cfg copilotSettings
+		json.Unmarshal(data, &cfg)
+		if cfg.Hooks != nil && len(cfg.Hooks.PreToolUse) > 0 {
+			t.Errorf("expected no entries after uninstall, got %d", len(cfg.Hooks.PreToolUse))
+		}
+	}
+}
+
+func TestInstallCopilotPreservesExtraKeys(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	copilotDir := filepath.Join(tmpHome, ".copilot")
+	os.MkdirAll(copilotDir, 0755)
+
+	existing := map[string]any{
+		"version": 1,
+		"someUserSetting": "yes",
+		"hooks": map[string]any{
+			"preToolUse": []map[string]any{
+				{"type": "command", "bash": "/usr/local/bin/audit"},
+			},
+		},
+	}
+	data, _ := json.MarshalIndent(existing, "", "  ")
+	os.WriteFile(filepath.Join(copilotDir, "settings.json"), data, 0644)
+
+	if err := InstallHooks(HarnessCopilot, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := os.ReadFile(filepath.Join(copilotDir, "settings.json"))
+	var raw map[string]any
+	json.Unmarshal(out, &raw)
+	if raw["someUserSetting"] != "yes" {
+		t.Errorf("someUserSetting lost: %v", raw["someUserSetting"])
+	}
+
+	var cfg copilotSettings
+	json.Unmarshal(out, &cfg)
+	if len(cfg.Hooks.PreToolUse) != 2 {
+		t.Errorf("expected 2 hooks (existing + vibecop), got %d: %#v", len(cfg.Hooks.PreToolUse), cfg.Hooks.PreToolUse)
+	}
+}
