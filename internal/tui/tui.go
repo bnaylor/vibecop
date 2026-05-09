@@ -305,17 +305,18 @@ func (a *App) buildActivityPage() tview.Primitive {
 		AddItem(rightPanel, 0, 2, false)
 	flex.AddItem(middle, 0, 1, true)
 
-	// Cycle order: list first (most-used), then sidebar top-to-bottom,
-	// then log. Yellow border highlights the focused panel.
+	// Cycle order: activity → config → log. Latency is intentionally
+	// excluded — it's three lines of stats, fullscreening it is just
+	// whitespace, and there's nothing inside it to scroll. Cycling
+	// through it would just be noise. The pane still renders normally;
+	// it's just not part of the focus rotation.
 	a.activityFocusables = []tview.Primitive{
 		a.activity,
-		a.latencyView,
 		a.configView,
 		a.logView,
 	}
-	a.activityFocusableNames = []string{"activity", "latency", "config", "log"}
+	a.activityFocusableNames = []string{"activity", "config", "log"}
 	a.wireFocusHighlight(a.activity.Box)
-	a.wireFocusHighlight(a.latencyView.Box)
 	a.wireFocusHighlight(a.configView.Box)
 	a.wireFocusHighlight(a.logView.Box)
 
