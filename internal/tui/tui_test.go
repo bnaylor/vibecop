@@ -501,6 +501,29 @@ func TestFormatEscalDetailContentRendersAllFields(t *testing.T) {
 	}
 }
 
+// TestFormatEscalDetailContentRendersMarkdownAfterErrorBanner — guards
+// the VCOP-16 fix where a failed complete_pending used to leave the
+// detail view showing only a red error string. The renderer's pure
+// formatter is what the error path now stitches together with a
+// banner, so verify it round-trips a well-formed entry post-banner.
+func TestFormatEscalDetailContentSurvivesPrependingBanner(t *testing.T) {
+	p := daemon.PendingEntry{
+		Tool: "Bash", Input: "echo x", Verdict: "escalate",
+		Reason: "destructive", Timestamp: "2026-05-09T12:00:00Z",
+	}
+	banner := "\n  [red]complete_pending failed: timeout[white]\n\n"
+	composed := banner + formatEscalDetailContent(p, false)
+	if !strings.Contains(composed, "complete_pending failed") {
+		t.Error("composed text missing banner")
+	}
+	if !strings.Contains(composed, "Bash") || !strings.Contains(composed, "echo x") {
+		t.Errorf("composed text dropped entry context after banner: %q", composed)
+	}
+	if !strings.Contains(composed, "Esc[gray]:back") {
+		t.Errorf("composed text missing return hint: %q", composed)
+	}
+}
+
 func TestFormatEscalDetailEmptyMentionsEsc(t *testing.T) {
 	got := formatEscalDetailEmpty()
 	if !strings.Contains(got, "Esc") {

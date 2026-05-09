@@ -201,9 +201,9 @@ type App struct {
 	// daemon-supplied UTC RFC3339 timestamps to the local zone before
 	// truncation. Defaults to true; the daemon honors the
 	// `daemon.display_local_time` config knob and ships the resolved
-	// value down via get_config. Read/written only on the tview main
-	// goroutine (UpdateConfig dispatches via QueueUpdateDraw), so no
-	// extra synchronization needed.
+	// value down via get_config. Reads and writes both happen inside
+	// QueueUpdateDraw closures so they share a happens-before edge —
+	// any read on a background goroutine is a data race.
 	displayLocalTime bool
 
 	// configPath is the absolute path of the live config.toml as
@@ -256,6 +256,7 @@ type App struct {
 	// Stop signal for the header clock goroutine. Closed in Close() to
 	// terminate the ticker without leaking once the TUI exits.
 	clockDone chan struct{}
+	closeOnce sync.Once
 
 	mu sync.Mutex
 }
@@ -669,6 +670,16 @@ func formatEscalDetailEmpty() string {
 // the queue is refreshed and the detail view repaints with whichever
 // entry now sits at the prior index (clamped). Empty queue → the
 // empty banner.
+//
+// The refresh-then-advance flow is one synchronous goroutine that
+// owns the whole sequence: complete → fetchPending → queue a single
+// QueueUpdateDraw closure that does both rebuild and advance. An
+// earlier version split rebuild and advance into two QueueUpdateDraw
+// calls and assumed they'd land in order; they didn't (the rebuild
+// goroutine queued its draw *after* the advance closure had already
+// been queued), causing rapid `a`/`d` keystrokes to act on stale
+// indices and surface "pending record not found" errors. This shape
+// is the fix for that race.
 func (a *App) completeSelectedAndAdvance(humanDecision string) {
 	if a.escalations == nil || a.escalations.GetItemCount() == 0 {
 		return
@@ -681,24 +692,33 @@ func (a *App) completeSelectedAndAdvance(humanDecision string) {
 
 	go func() {
 		if err := a.completePending(target.ProjectHash, target.Key, humanDecision); err != nil {
+			// On daemon error, repaint the detail view with the
+			// error banner *plus* the original entry below, so the
+			// user has context — just an error string with no
+			// surrounding entry leaves them stuck unable to tell
+			// what they were acting on.
 			a.app.QueueUpdateDraw(func() {
-				a.escalDetailView.SetText(fmt.Sprintf("\n  [red]complete_pending failed: %v[white]\n", err))
+				banner := fmt.Sprintf("\n  [red]complete_pending failed: %v[white]\n\n", err)
+				a.escalDetailView.SetText(banner + formatEscalDetailContent(target, a.displayLocalTime))
 			})
 			return
 		}
 
-		// Force-refresh the queue so the rebuild lands before we
-		// repaint. requestEscalationRefresh is debounced; passing
-		// force=true bypasses the cooldown for this user-initiated
-		// action.
-		a.requestEscalationRefresh(true)
+		// Synchronously fetch the new pending list before queueing
+		// any draw — this is the load-bearing ordering. By the time
+		// the closure below runs, fresh pending data is already in
+		// the local var, so rebuild + advance happen atomically on
+		// the main goroutine.
+		pending, auditEnabled, fetchErr := a.fetchPending()
+		if fetchErr != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.escalEmpty.SetText(fmt.Sprintf("[red]list_pending failed: %v[white]", fetchErr))
+			})
+			return
+		}
 
-		// Wait for the refresh goroutine to complete so the rebuild
-		// has settled before repaint. The simplest way to chain after
-		// `refreshEscalations` is a second QueueUpdateDraw — the main
-		// loop drains them in submission order, so by the time this
-		// runs the rebuilt list is in place.
 		a.app.QueueUpdateDraw(func() {
+			a.rebuildEscalationList(pending, auditEnabled)
 			a.advanceAfterCompletion(idx)
 		})
 	}()
@@ -1181,9 +1201,14 @@ func (a *App) handleEvent(evt daemon.Event) {
 // away to another pane, no compensation is needed and the table
 // scrolls naturally.
 func (a *App) addActivity(evt daemon.Event) {
-	ts, verdict, tool, body, vColor := formatActivityCells(evt, a.displayLocalTime)
-
 	a.app.QueueUpdateDraw(func() {
+		// formatActivityCells reads a.displayLocalTime — keep it
+		// inside QueueUpdateDraw so the read shares a happens-before
+		// edge with UpdateConfig's writes (also QueueUpdateDraw'd).
+		// Reading on the readEvents goroutine before the closure
+		// would be a data race.
+		ts, verdict, tool, body, vColor := formatActivityCells(evt, a.displayLocalTime)
+
 		focused := a.app.GetFocus() == a.activity
 		var prevSelRow, prevOffRow int
 		if focused {
@@ -1263,10 +1288,12 @@ func (a *App) addLogLine(evt daemon.Event) {
 		levelColor = "green"
 	}
 
-	ts := formatLogTimestamp(evt.Timestamp, a.displayLocalTime)
-	line := fmt.Sprintf("[%s]%s[white] [gray]%s[white] %s", levelColor, strings.ToUpper(evt.Level), ts, evt.Message)
-
 	a.app.QueueUpdateDraw(func() {
+		// Read a.displayLocalTime inside the closure (main goroutine)
+		// to avoid a race against UpdateConfig's writes.
+		ts := formatLogTimestamp(evt.Timestamp, a.displayLocalTime)
+		line := fmt.Sprintf("[%s]%s[white] [gray]%s[white] %s", levelColor, strings.ToUpper(evt.Level), ts, evt.Message)
+
 		// First real log entry replaces the "log: idle" placeholder so
 		// it doesn't sit at the top of the scrollback forever.
 		if !a.logHasEntries {
@@ -1416,10 +1443,16 @@ func visibleLength(s string) int {
 }
 
 // runClock pumps a header redraw once per second so the right-aligned
-// time advances. Exits when Close() closes a.clockDone, which is the
-// only safe shutdown signal — calling QueueUpdateDraw on a stopped
-// Application is a no-op (writes to a closed channel) but the
-// goroutine still leaks if we don't drain it.
+// time advances. Exits when Close() closes a.clockDone.
+//
+// QueueUpdateDraw blocks waiting for the main loop to drain the
+// update; if the Application has already been Stop'd (e.g. user hit
+// `q`), the loop is gone and the call hangs forever. To keep the
+// outer ticker loop responsive to clockDone, we dispatch each redraw
+// on a detached goroutine and race against clockDone. The detached
+// goroutine may leak in the post-Stop window but it's bounded — the
+// process is about to exit when the user quits — and the outer loop
+// returns cleanly on the close.
 func (a *App) runClock() {
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
@@ -1431,7 +1464,10 @@ func (a *App) runClock() {
 			if a.app == nil || a.headerView == nil {
 				continue
 			}
-			a.app.QueueUpdateDraw(a.redrawHeader)
+			// Non-blocking dispatch: if QueueUpdateDraw blocks
+			// because the app stopped, it leaks here, not in the
+			// ticker loop.
+			go a.app.QueueUpdateDraw(a.redrawHeader)
 		}
 	}
 }
@@ -1737,19 +1773,17 @@ func (a *App) finishEscalationRefresh() {
 	a.mu.Unlock()
 }
 
-// Close shuts down the TUI and disconnects from the daemon. Idempotent
-// — guarded so a double Close (via defer + an earlier panic recovery)
-// doesn't panic on close-of-closed-channel.
+// Close shuts down the TUI and disconnects from the daemon. Concurrent-
+// and double-call safe via sync.Once — the prior select-default pattern
+// could race two callers into both observing default: and panic on
+// close-of-closed-channel.
 func (a *App) Close() {
-	if a.clockDone != nil {
-		select {
-		case <-a.clockDone:
-			// Already closed.
-		default:
+	a.closeOnce.Do(func() {
+		if a.clockDone != nil {
 			close(a.clockDone)
 		}
-	}
-	if a.conn != nil {
-		a.conn.Close()
-	}
+		if a.conn != nil {
+			a.conn.Close()
+		}
+	})
 }
