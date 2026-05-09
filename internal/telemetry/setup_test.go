@@ -31,7 +31,7 @@ func TestSetupNoTargetsReturnsNil(t *testing.T) {
 
 func TestNilProviderIsNoOp(t *testing.T) {
 	var p *Provider
-	ctx, span := p.StartPermissionSpan(context.Background(), "Bash", "abcd")
+	ctx, span := p.StartPermissionSpan(context.Background(), "Bash", "abcd", "claude", "PreToolUse")
 	span.End()
 	if ctx == nil {
 		t.Error("StartPermissionSpan returned nil context")
@@ -41,8 +41,8 @@ func TestNilProviderIsNoOp(t *testing.T) {
 	if ctx2 == nil {
 		t.Error("StartEvaluatorSpan returned nil context")
 	}
-	p.RecordVerdict(ctx, "approve", "Bash")
-	p.RecordEvaluatorLatency(ctx, 42, "approve")
+	p.RecordVerdict(ctx, "approve", "Bash", "claude")
+	p.RecordEvaluatorLatency(ctx, 42, "approve", "claude")
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Errorf("nil shutdown should not error: %v", err)
 	}

@@ -38,6 +38,8 @@ type Request struct {
 	Key           string `json:"key,omitempty"`
 	ProjectHash   string `json:"project_hash,omitempty"`
 	HumanDecision string `json:"human_decision,omitempty"`
+	Harness       string `json:"harness,omitempty"`
+	HookEvent     string `json:"hook_event,omitempty"`
 }
 
 // Verdict returned to a hook.
@@ -95,6 +97,8 @@ type Event struct {
 	Timestamp string `json:"timestamp,omitempty"`
 	Level     string `json:"level,omitempty"` // "info", "warn", "error"
 	Message   string `json:"message,omitempty"`
+	Harness   string `json:"harness,omitempty"`
+	HookEvent string `json:"hook_event,omitempty"`
 }
 
 // permissionHandler is called when a permission_request arrives.
@@ -205,13 +209,20 @@ func (d *Daemon) Start() error {
 
 	log.Printf("daemon: listening on %s (pid %d)", d.socketPath, os.Getpid())
 
-	// Start the event broadcaster.
-	go d.broadcastEvents()
+	// Start the event broadcaster. Capture d.evtCh here (in Start, before
+	// any Stop can race) and pass it as a parameter so the goroutine never
+	// reads d.evtCh after shutdown() may have nil-ed it.
+	go d.broadcastEvents(d.evtCh)
 
-	// Accept loop.
-	go func(listener net.Listener) {
+	// Accept loop. Capture the listener in a local so the goroutine holds a
+	// live reference even after shutdown() sets d.listener = nil. Without
+	// this capture, a goroutine scheduling window between listener.Close()
+	// and listener=nil lets the goroutine race to the top of the loop and
+	// call nil.Accept(), which panics.
+	l := d.listener
+	go func() {
 		for {
-			conn, err := listener.Accept()
+			conn, err := l.Accept()
 			if err != nil {
 				select {
 				case <-d.quit:
@@ -224,7 +235,7 @@ func (d *Daemon) Start() error {
 			d.wg.Add(1)
 			go d.handleConn(conn)
 		}
-	}(d.listener)
+	}()
 
 	return nil
 }
@@ -279,12 +290,17 @@ func (d *Daemon) shutdown() error {
 	d.subs = nil
 	d.subsMu.Unlock()
 
-	// Close event channel so broadcaster exits.
+	// Wait for in-flight connections first — before closing evtCh. handleConn
+	// goroutines (including the permission handler) call d.EmitEvent(), which
+	// sends to d.evtCh. Closing evtCh before they finish would panic (send on
+	// closed channel). TUI subscriber goroutines exit because their channels
+	// were closed above; permission goroutines finish their LLM call and return.
+	d.wg.Wait()
+
+	// Close event channel so broadcaster exits. Safe now that no more
+	// EmitEvent() callers are running (wg.Wait() above).
 	close(d.evtCh)
 	d.evtCh = nil
-
-	// Wait for in-flight connections (now unblocked).
-	d.wg.Wait()
 
 	// Remove socket.
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
@@ -309,7 +325,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 	// connection is harmless. Log and move on.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("daemon: handler panic recovered: %v", r)
+		log.Printf("daemon: handler panic recovered: %v", r)
 		}
 	}()
 
@@ -423,7 +439,7 @@ func handleTUISubscribe(conn net.Conn, d *Daemon) {
 	for evt := range ch {
 		data, err := json.Marshal(evt)
 		if err != nil {
-			continue
+		continue
 		}
 		data = append(data, '\n')
 		if _, err := conn.Write(data); err != nil {
@@ -437,24 +453,26 @@ func handleTUISubscribe(conn net.Conn, d *Daemon) {
 	d.subsMu.Unlock()
 }
 
-func (d *Daemon) broadcastEvents() {
-	for evt := range d.evtCh {
+func (d *Daemon) broadcastEvents(evtCh chan Event) {
+	// evtCh is passed by Start() at goroutine-creation time so we never read
+	// d.evtCh inside this goroutine — shutdown() may nil d.evtCh concurrently.
+	for evt := range evtCh {
 		d.subsMu.Lock()
 		for ch := range d.subs {
-			select {
+		select {
 			case ch <- evt:
-			default:
+		default:
 				// Drop for slow subscribers.
-			}
+		}
 		}
 		d.subsMu.Unlock()
 
 		if d.otlpCh != nil {
-			select {
+		select {
 			case d.otlpCh <- evt:
-			default:
+		default:
 				// Drop for slow OTLP exporter — fail-open.
-			}
+		}
 		}
 	}
 	if d.otlpCh != nil {

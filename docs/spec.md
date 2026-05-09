@@ -103,17 +103,17 @@ vibecop stop               Stop the background daemon
 vibecop status             Show daemon status, current config, active project
 vibecop tui                Attach the TUI to a running daemon
 vibecop init               Initialize Guardian mode for the current project
-  --harness  claude|gemini|deepseek   Agent to use for prompt generation (required)
+  --harness  claude|codex|gemini|copilot   Agent to use for prompt generation (required)
   --dry-run                           Print generated prompt without saving
 vibecop install            Install hook scripts into the coding harness configs
-  --harness  claude|gemini|deepseek   Harness to install into (required or --all)
+  --harness  claude|codex|gemini|copilot   Harness to install into (required or --all)
   --all                               Install into all detected harnesses
 vibecop uninstall          Remove installed hook scripts
-  --harness  claude|gemini|deepseek
+  --harness  claude|codex|gemini|copilot
 vibecop hook               Hook entry point (called by installed scripts, reads stdin)
 vibecop test               Send a probe request to the configured endpoint
 vibecop refine             Regenerate the Guardian prompt for the current project
-  --harness  claude|gemini|deepseek
+  --harness  claude|codex|gemini|copilot
 ```
 
 ## Core Architecture
@@ -164,7 +164,7 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 
 ### Hook scripts
 
-`vibecop install` writes thin wrapper scripts that delegate entirely to `vibecop hook`:
+`vibecop install` writes thin wrapper config that delegates entirely to `vibecop hook`:
 
 **Claude Code** (`~/.claude/settings.json` — adds a `PreToolUse` hook):
 ```json
@@ -180,28 +180,83 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 }
 ```
 
-**Gemini CLI** (`~/.gemini/settings.json` — equivalent hook config):
+**Codex CLI** (`~/.codex/hooks.json` — registers under both `PreToolUse` and `PermissionRequest`; PreToolUse cannot allow on Codex, so PermissionRequest is the only event that can silently approve):
 ```json
 {
   "hooks": {
-    "before_tool": "vibecop hook"
+    "PreToolUse": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "vibecop hook" }] }
+    ],
+    "PermissionRequest": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "vibecop hook" }] }
+    ]
   }
 }
 ```
 
-`vibecop hook` reads the harness's JSON payload from stdin, normalizes it to the IPC request format, sends it to the daemon socket, and exits according to the exit code contract. The harness is auto-detected from the input payload shape; it can also be overridden with `--harness`.
+**Gemini CLI** (`~/.gemini/settings.json` — `BeforeTool` (PascalCase) hook, array of matcher groups, same shape as Claude):
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      { "hooks": [{ "type": "command", "command": "vibecop hook" }] }
+    ]
+  }
+}
+```
 
-### Exit code contract
+**Copilot CLI** (`~/.copilot/settings.json` — flat array of hook definitions, command lives under `bash`):
+```json
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      { "type": "command", "bash": "vibecop hook" }
+    ]
+  }
+}
+```
 
-| Verdict | Exit code | Stderr |
-|---|---|---|
-| `approve` | `0` | silent |
-| `deny` | `1` | `VibeCop [DENY]: <reason>` |
-| `escalate` | `1` | `VibeCop [ESCALATE]: <reason>` |
-| timeout | `1` | `VibeCop: timed out after <N>ms — escalating` |
-| daemon unreachable | `0` | silent (fail-open) |
+`vibecop hook` reads the harness's JSON payload from stdin, normalizes it to the IPC request format, sends it to the daemon socket, and emits the harness-native JSON response on stdout. The harness is auto-detected from the input payload shape; it can also be overridden with `--harness {claude|gemini|codex|copilot}`.
 
-Non-zero exit causes the coding harness to surface its own native permission prompt. The stderr text is displayed to the user as context. The human always has final say — `deny` is a strong recommendation, not a unilateral block.
+### Verdict → harness response contract
+
+`vibecop hook` always exits 0 — the JSON it writes to stdout is what the harness keys off. The exit code is reserved for fail-open: a parse error, a marshal failure, an unrecognized harness/event, or an unknown verdict all produce no stdout and exit 0 with a single-line stderr diagnostic.
+
+| Verdict    | Behavior                                                                                                                                                 |
+|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `approve`  | Emit harness-native "allow" JSON. Skips the harness's user prompt.                                                                                       |
+| `deny`     | Emit harness-native "deny" JSON. Tool is blocked. Stderr `VibeCop [DENY]: <reason>` is preserved for operator visibility.                                |
+| `escalate` | Emit no JSON. The harness's normal permission flow runs (typically prompts the user). Stderr `VibeCop [ESCALATE]: <reason>` is preserved when reason is non-empty. |
+
+`escalate` deliberately does not map to a harness's "ask" decision: vibecop's preference is "no objection, defer to whatever the harness would have done" rather than forcing a prompt the harness might otherwise have skipped under a user-defined rule.
+
+#### Per-harness JSON shapes
+
+Reason fields are omitted when the daemon's reason is empty.
+
+| (harness, event)             | `approve`                                                                                                              | `deny`                                                                                                                       |
+|------------------------------|------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `claude`, `PreToolUse`       | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"…"}}`    | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`           |
+| `codex`, `PreToolUse`        | (no stdout — Codex `PreToolUse` cannot allow; `PermissionRequest` is the approval channel)                             | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`           |
+| `codex`, `PermissionRequest` | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`                         | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"…"}}}`                  |
+| `gemini`, `BeforeTool`       | `{"decision":"allow","reason":"…"}`                                                                                    | `{"decision":"deny","reason":"…"}`                                                                                           |
+| `copilot`, `preToolUse`      | `{"permissionDecision":"allow"}`                                                                                       | `{"permissionDecision":"deny","permissionDecisionReason":"…"}`                                                               |
+
+### Harness limitations
+
+- **Copilot CLI does not currently honor `permissionDecision: "allow"`.** The harness's normal permission flow runs anyway, so vibecop's `approve` verdict on Copilot is effectively informational. To get the "skip the prompt for approved tools" experience, run `/allow-all on` inside Copilot — vibecop's `deny` still blocks tool calls when `/allow-all on` is active. The hook surfaces this as a one-line stderr advisory at install time and again at runtime (throttled to once per hour via a marker file under `~/.vibecop/hints/`).
+- **Codex CLI cannot allow at `PreToolUse`.** vibecop installs under both `PreToolUse` and `PermissionRequest`; silent approval is delivered through `PermissionRequest`, where Codex honors it. No user action needed.
+
+### Failure modes
+
+- **Daemon unreachable** — hook exits 0 silently (no stdout, no JSON).
+- **Unparseable stdin** — fail-open: stderr diagnostic, exit 0.
+- **JSON marshal failure in `WriteVerdict`** — fail-open: no stdout, exit 0.
+- **Unknown `(harness, event)` or unknown verdict** — fail-open: no stdout, single-line stderr diagnostic, exit 0. The `[DENY]` / `[ESCALATE]` stderr line is suppressed in this case so the operator's terminal isn't lying about a block that didn't happen.
+- **Three-consecutive evaluator failures** — daemon-side suspension (unchanged from "Failure Handling" below); the hook still emits per-harness responses, just always `approve`.
+
+The human always has final say. `deny` is a strong recommendation that the harness can override (e.g. Claude Code's "approve anyway" affordance after seeing the deny reason).
 
 ### TUI
 

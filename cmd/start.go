@@ -12,6 +12,7 @@ import (
 	"github.com/bnaylor/vibecop/internal/config"
 	"github.com/bnaylor/vibecop/internal/daemon"
 	"github.com/bnaylor/vibecop/internal/evaluator"
+	"github.com/bnaylor/vibecop/internal/hooks"
 	"github.com/bnaylor/vibecop/internal/telemetry"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
@@ -129,13 +130,19 @@ func makePermissionHandler(
 	)
 
 	return func(req daemon.Request) daemon.Verdict {
+		// Clamp telemetry-bound harness/event labels to the known set so a
+		// hostile or buggy local UDS client can't blow up dashboard
+		// cardinality with arbitrary strings.
+		harnessLabel := hooks.SanitizeHarness(req.Harness)
+		eventLabel := hooks.SanitizeHookEvent(req.HookEvent)
+
 		// Fail-open if the evaluator has had too many consecutive errors.
 		failMu.Lock()
 		isSuspended := suspended
 		failMu.Unlock()
 
 		if isSuspended {
-			tp.RecordVerdict(context.Background(), "approve", req.Tool)
+			tp.RecordVerdict(context.Background(), "approve", req.Tool, harnessLabel)
 			d.EmitEvent(daemon.Event{
 				Tool:      req.Tool,
 				Input:     req.Input,
@@ -144,13 +151,15 @@ func makePermissionHandler(
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 				Level:     "warn",
 				Message:   "VibeCop suspended after repeated failures — pass-through mode",
+				Harness:   harnessLabel,
+				HookEvent: eventLabel,
 			})
 			return daemon.Verdict{Verdict: "approve"}
 		}
 
 		projectHash := config.ProjectHash(req.ProjectPath)
 
-		spanCtx, rootSpan := tp.StartPermissionSpan(context.Background(), req.Tool, projectHash)
+		spanCtx, rootSpan := tp.StartPermissionSpan(context.Background(), req.Tool, projectHash, harnessLabel, eventLabel)
 		defer rootSpan.End()
 
 		// Get or create per-project activity store and audit logger.
@@ -173,7 +182,7 @@ func makePermissionHandler(
 			log.Printf("evaluator: prompt resolution error: %v", err)
 			rootSpan.SetStatus(codes.Error, "prompt resolution failed")
 			rootSpan.RecordError(err)
-			tp.RecordVerdict(spanCtx, "escalate", req.Tool)
+			tp.RecordVerdict(spanCtx, "escalate", req.Tool, harnessLabel)
 			return daemon.Verdict{
 				Verdict: "escalate",
 				Reason:  "VibeCop: failed to load configuration",
@@ -270,6 +279,8 @@ func makePermissionHandler(
 			Reason:    reasonStr,
 			LatencyMs: latencyMs,
 			Timestamp: now.Format(time.RFC3339),
+			Harness:   harnessLabel,
+			HookEvent: eventLabel,
 		})
 
 		// Telemetry — annotate root span and record metrics.
@@ -288,8 +299,8 @@ func makePermissionHandler(
 		if verdictStr == "deny" || verdictStr == "error" {
 			rootSpan.SetStatus(codes.Error, reasonStr)
 		}
-		tp.RecordVerdict(spanCtx, verdictStr, req.Tool)
-		tp.RecordEvaluatorLatency(spanCtx, latencyMs, verdictStr)
+		tp.RecordVerdict(spanCtx, verdictStr, req.Tool, harnessLabel)
+		tp.RecordEvaluatorLatency(spanCtx, latencyMs, verdictStr, harnessLabel)
 
 		return daemon.Verdict{
 			Verdict: verdictStr,

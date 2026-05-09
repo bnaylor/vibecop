@@ -91,7 +91,7 @@ vibecop tui                # (another terminal) watch verdicts in real-time
 Then for full integration with coding agents:
 
 ```sh
-vibecop install --all      # wire hooks into Claude Code and Gemini CLI
+vibecop install --all      # wire hooks into Claude Code, Codex, Gemini CLI, Copilot CLI
 vibecop init --harness claude   # generate Guardian prompt for this project
 ```
 
