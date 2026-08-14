@@ -1,0 +1,266 @@
+diff --git a/tools/approval.py b/tools/approval.py
+index 6ed1fb9cb..30e101252 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -16,6 +16,7 @@ import sys
+ import threading
+ import time
+ import unicodedata
++from pathlib import Path
+ from typing import Optional
+ from hermes_cli.config import cfg_get
+ 
+@@ -675,6 +676,7 @@ _pending: dict[str, dict] = {}
+ _session_approved: dict[str, set] = {}
+ _session_yolo: set[str] = set()
+ _permanent_approved: set = set()
++_session_activity: dict[str, list] = {}  # session_key → list of {tool, input, verdict}
+ 
+ # =========================================================================
+ # Blocking gateway approval (mirrors CLI's synchronous input() flow)
+@@ -795,6 +797,7 @@ def clear_session(session_key: str) -> None:
+         _session_approved.pop(session_key, None)
+         _session_yolo.discard(session_key)
+         _pending.pop(session_key, None)
++        _session_activity.pop(session_key, None)
+         entries = _gateway_queues.pop(session_key, [])
+     for entry in entries:
+         # Session-boundary cleanup should cancel any blocked approval waits
+@@ -1048,7 +1051,132 @@ def _get_cron_approval_mode() -> str:
+         return "deny"
+ 
+ 
+-def _smart_approve(command: str, description: str) -> str:
++# =========================================================================
++# Guardian mode — project-aware smart approvals
++# =========================================================================
++
++def _get_guardian_config() -> dict:
++    """Read the guardian config block from approvals.guardian.*"""
++    return _get_approval_config().get("guardian", {}) or {}
++
++
++def _is_guardian_enabled() -> bool:
++    """Check if guardian mode is enabled in config."""
++    return _get_guardian_config().get("enabled", False)
++
++
++def _get_activity_window() -> int:
++    """Read the activity window size from guardian config."""
++    try:
++        return int(_get_guardian_config().get("activity_window", 10))
++    except (ValueError, TypeError):
++        return 10
++
++
++def record_activity(session_key: str, tool: str, input_text: str, verdict: str) -> None:
++    """Record a tool call and its approval verdict for session activity tracking.
++    
++    Keeps a rolling window of the last N entries (N = activity_window from config).
++    Thread-safe.
++    """
++    window = _get_activity_window()
++    with _lock:
++        activities = _session_activity.setdefault(session_key, [])
++        activities.append({
++            "tool": tool,
++            "input": input_text[:200],
++            "verdict": verdict,
++        })
++        if len(activities) > window:
++            activities[:len(activities) - window] = []
++
++
++def _get_recent_activity(session_key: str) -> list[dict]:
++    """Get recent activity for a session (thread-safe snapshot)."""
++    with _lock:
++        return list(_session_activity.get(session_key, []))
++
++
++def clear_session_activity(session_key: str) -> None:
++    """Clear activity tracking for a session."""
++    with _lock:
++        _session_activity.pop(session_key, None)
++
++
++def _load_guardian_prompt() -> str:
++    """Load the guardian system prompt from file.
++    
++    Resolution order:
++    1. approvals.guardian.prompt_path (explicit config path)
++    2. <project-root>/.hermes/guardian-prompt.md (per-project)
++    3. ~/.hermes/guardian-prompt.md (global)
++    
++    Returns empty string if none found.
++    """
++    try:
++        cfg = _get_guardian_config()
++        prompt_path = cfg.get("prompt_path", "") or ""
++        if prompt_path:
++            path = Path(prompt_path).expanduser()
++            if path.is_file():
++                return path.read_text(encoding="utf-8", errors="replace")
++
++        # Per-project: look in .hermes/guardian-prompt.md at project root
++        try:
++            from agent.coding_context import _git_root, _marker_root
++            from agent.runtime_cwd import resolve_agent_cwd
++            cwd = resolve_agent_cwd()
++            root = _git_root(cwd) or _marker_root(cwd)
++            if root:
++                project_prompt = root / ".hermes" / "guardian-prompt.md"
++                if project_prompt.is_file():
++                    return project_prompt.read_text(encoding="utf-8", errors="replace")
++        except Exception:
++            pass
++
++        # Global fallback
++        global_prompt = Path.home() / ".hermes" / "guardian-prompt.md"
++        if global_prompt.is_file():
++            return global_prompt.read_text(encoding="utf-8", errors="replace")
++    except Exception:
++        pass
++    return ""
++
++
++def _get_project_context() -> str:
++    """Build project context from coding_context for the approval LLM.
++    
++    Returns a formatted string like:
++        Project context:
++        - Root: /home/user/project
++        - Branch: main
++        - Status: 3 modified
++        - Project: go.mod
++    """
++    try:
++        from agent.coding_context import build_coding_workspace_block
++        block = build_coding_workspace_block()
++        if block:
++            return f"Project context:\n{block}"
++    except Exception:
++        pass
++    return ""
++
++
++def _format_recent_activity(activities: list[dict]) -> str:
++    """Format recent activity for the approval LLM prompt."""
++    if not activities:
++        return ""
++    lines = ["Recent tool activity in this session (most recent first):"]
++    for entry in reversed(activities[-5:]):
++        inp = (entry.get("input") or "")[:120]
++        lines.append(f"  [{entry.get('verdict', '?')}] {entry.get('tool', '?')}: {inp}")
++    return "\n".join(lines)
++
++
++def _smart_approve(command: str, description: str,
++                   project_context: str = "",
++                   recent_activity: Optional[list[dict]] = None) -> str:
+     """Use the auxiliary LLM to assess risk and decide approval.
+ 
+     Returns 'approve' if the LLM determines the command is safe,
+@@ -1060,25 +1188,55 @@ def _smart_approve(command: str, description: str) -> str:
+     try:
+         from agent.auxiliary_client import call_llm
+ 
+-        prompt = f"""You are a security reviewer for an AI coding agent. A terminal command was flagged by pattern matching as potentially dangerous.
+-
+-Command: {command}
+-Flagged reason: {description}
+-
+-Assess the ACTUAL risk of this command. Many flagged commands are false positives — for example, `python -c "print('hello')"` is flagged as "script execution via -c flag" but is completely harmless.
+-
+-Rules:
+-- APPROVE if the command is clearly safe (benign script execution, safe file operations, development tools, package installs, git operations, etc.)
+-- DENY if the command could genuinely damage the system (recursive delete of important paths, overwriting system files, fork bombs, wiping disks, dropping databases, etc.)
+-- ESCALATE if you're uncertain
+-
+-Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
++        # Build messages — guardian prompt as system, command + context as user
++        messages = []
++
++        guardian_prompt = _load_guardian_prompt()
++        if guardian_prompt:
++            # Custom guardian prompt replaces everything
++            messages.append({"role": "system", "content": guardian_prompt})
++            user_parts = [f"Command: {command}", f"Flagged reason: {description}"]
++            if recent_activity:
++                fmt = _format_recent_activity(recent_activity)
++                if fmt:
++                    user_parts.append(fmt)
++            messages.append({"role": "user", "content": "\n\n".join(user_parts)})
++            max_tokens = 64  # guardian prompts may need more room for reasoning
++        else:
++            # Default prompt with optional project context + activity
++            prompt_parts = [
++                "You are a security reviewer for an AI coding agent. "
++                "A terminal command was flagged by pattern matching as potentially dangerous."
++            ]
++            if project_context:
++                prompt_parts.append(project_context)
++            if recent_activity:
++                fmt = _format_recent_activity(recent_activity)
++                if fmt:
++                    prompt_parts.append(fmt)
++
++            prompt_parts.append(
++                f"Command: {command}\nFlagged reason: {description}\n\n"
++                "Assess the ACTUAL risk of this command. Many flagged commands "
++                "are false positives — for example, `python -c \"print('hello')\"` "
++                "is flagged as \"script execution via -c flag\" but is completely harmless.\n\n"
++                "Rules:\n"
++                "- APPROVE if the command is clearly safe (benign script execution, "
++                "safe file operations, development tools, package installs, git operations, etc.)\n"
++                "- DENY if the command could genuinely damage the system (recursive delete "
++                "of important paths, overwriting system files, fork bombs, wiping disks, "
++                "dropping databases, etc.)\n"
++                "- ESCALATE if you're uncertain\n\n"
++                "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
++            )
++            messages.append({"role": "user", "content": "\n\n".join(prompt_parts)})
++            max_tokens = 16
+ 
+         response = call_llm(
+             task="approval",
+-            messages=[{"role": "user", "content": prompt}],
++            messages=messages,
+             temperature=0,
+-            max_tokens=16,
++            max_tokens=max_tokens,
+         )
+ 
+         answer = (response.choices[0].message.content or "").strip().upper()
+@@ -1442,18 +1600,24 @@ def check_all_command_guards(command: str, env_type: str,
+     # (openai/codex#13860).
+     if approval_mode == "smart":
+         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
+-        verdict = _smart_approve(command, combined_desc_for_llm)
++        # Gather guardian context — project info + recent activity
++        ctx = _get_project_context() if _is_guardian_enabled() else ""
++        activity = _get_recent_activity(session_key) if _is_guardian_enabled() else None
++        verdict = _smart_approve(command, combined_desc_for_llm,
++                                 project_context=ctx, recent_activity=activity)
+         if verdict == "approve":
+             # Auto-approve and grant session-level approval for these patterns
+             for key, _, _ in warnings:
+                 approve_session(session_key, key)
+             logger.debug("Smart approval: auto-approved '%s' (%s)",
+                          command[:60], combined_desc_for_llm)
++            record_activity(session_key, "Bash", command, "approved")
+             return {"approved": True, "message": None,
+                     "smart_approved": True,
+                     "description": combined_desc_for_llm}
+         elif verdict == "deny":
+             combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
++            record_activity(session_key, "Bash", command, "denied")
+             return {
+                 "approved": False,
+                 "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
+@@ -1461,6 +1625,7 @@ def check_all_command_guards(command: str, env_type: str,
+                 "smart_denied": True,
+             }
+         # verdict == "escalate" → fall through to manual prompt
++        record_activity(session_key, "Bash", command, "escalated")
+ 
+     # --- Phase 3: Approval ---

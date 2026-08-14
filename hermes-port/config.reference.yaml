@@ -1,0 +1,28 @@
+# vibecop → Hermes port (Guardian mode) — config reference.
+# Copy these blocks into ~/.hermes/config.yaml. Pick ONE approval backend.
+
+approvals:
+  mode: smart                 # REQUIRED — Guardian extends smart mode
+  guardian:
+    enabled: true             # project context + activity tracking
+    prompt_path: ""           # optional; else <project>/.hermes/guardian-prompt.md → ~/.hermes/
+    activity_window: 10       # recent verdicts fed to the approval LLM
+
+# Approval LLM — Gemini (recommended for GCP / work; no local deps).
+auxiliary:
+  approval:
+    provider: google
+    model: gemini-2.5-flash
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    timeout: 15
+
+# Approval LLM — local Ollama (air-gapped / homelab only; requires the tuned
+# gemma4 model + thinkless proxy, which live with the homelab tooling).
+# auxiliary:
+#   approval:
+#     provider: openai
+#     model: gemma4-approval
+#     base_url: http://localhost:11435/v1
+#     extra_body: '{}'
+#     api_key: ''
+#     timeout: 15
