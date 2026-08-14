@@ -203,6 +203,10 @@ vibecop refine             Regenerate the Guardian prompt (uses recent activity 
 
 ---
 
+## Ports
+
+- **[`hermes-port/`](hermes-port/README.md)** — the same Guardian idea ported into [Hermes Agent](https://hermes-agent.nousresearch.com) as a source patch + `hermes approvals` CLI. For Hermes agents that want project-aware smart approvals without running the Go daemon.
+
 ## Background
 
 This project grew out of experimentation with the AI second-opinion concept — the idea that a second, context-free model evaluating tool-use requests is more trustworthy than a human who's been clicking Approve for two hours. `vibecop` is the standalone, no-GUI version: a single static binary that runs anywhere Go runs, with no Electron and no dependencies on any particular coding harness's UI.

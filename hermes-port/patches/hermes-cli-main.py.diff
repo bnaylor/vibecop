@@ -1,0 +1,52 @@
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index e9f77945f..94e8a21db 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -11077,7 +11077,7 @@ def cmd_logs(args):
+ # to parse.
+ _BUILTIN_SUBCOMMANDS = frozenset(
+     {
+-        "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
++        "acp", "approvals", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
+         "computer-use",
+         "config", "cron", "curator", "dashboard", "debug", "doctor",
+         "dump", "fallback", "gateway", "hooks", "import", "insights",
+@@ -11642,6 +11642,38 @@ def main():
+     )
+     fallback_parser.set_defaults(func=cmd_fallback)
+ 
++    # =========================================================================
++    # approvals — guardian mode management
++    # =========================================================================
++    from hermes_cli.approvals_cmd import cmd_approvals
++
++    approvals_parser = subparsers.add_parser(
++        "approvals",
++        help="Manage Guardian mode (project-aware smart approvals)",
++        description=(
++            "Manage Guardian mode for smart approvals. Guardian extends Hermes' "
++            "smart approval system with project-aware context and an editable "
++            "prompt file so the approval LLM understands what's normal for your "
++            "project. See: "
++            "https://github.com/bnaylor/vibecop/tree/main/hermes-port"
++        ),
++    )
++    approvals_subparsers = approvals_parser.add_subparsers(dest="approvals_command")
++    approvals_subparsers.add_parser(
++        "status",
++        aliases=["show"],
++        help="Show guardian config and prompt status (default when no subcommand)",
++    )
++    approvals_subparsers.add_parser(
++        "init",
++        help="Generate a project-specific guardian prompt by analyzing the codebase",
++    )
++    approvals_subparsers.add_parser(
++        "refine",
++        help="Regenerate the guardian prompt using recent session activity",
++    )
++    approvals_parser.set_defaults(func=cmd_approvals)
++
+     # =========================================================================
+     # secrets command — external secret managers (currently: Bitwarden)
+     # ========================================================================="
