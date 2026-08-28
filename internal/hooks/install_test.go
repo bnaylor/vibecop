@@ -247,6 +247,57 @@ func TestUninstallGeminiHooks(t *testing.T) {
 	}
 }
 
+func TestInstallAntigravityHooks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmpHome := os.Getenv("HOME")
+
+	if err := InstallHooks(HarnessAntigravity, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(tmpHome, ".gemini", "settings.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg geminiSettings
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Hooks == nil || len(cfg.Hooks.BeforeTool) != 1 {
+		t.Fatalf("expected one BeforeTool entry, got %#v", cfg.Hooks)
+	}
+	got := cfg.Hooks.BeforeTool[0]
+	if len(got.Hooks) != 1 || got.Hooks[0].Type != "command" || got.Hooks[0].Command != "vibecop hook" {
+		t.Errorf("unexpected BeforeTool entry: %#v", got)
+	}
+}
+
+func TestUninstallAgyHooks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmpHome := os.Getenv("HOME")
+
+	InstallHooks(HarnessAgy, "")
+	if err := UninstallHooks(HarnessAgy); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(tmpHome, ".gemini", "settings.json")
+	data, _ := os.ReadFile(path)
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["hooks"]; ok {
+		var cfg geminiSettings
+		json.Unmarshal(data, &cfg)
+		if cfg.Hooks != nil && len(cfg.Hooks.BeforeTool) > 0 {
+			t.Error("expected empty BeforeTool after uninstall")
+		}
+	}
+}
+
 func TestUninstallWhenNotInstalled(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })

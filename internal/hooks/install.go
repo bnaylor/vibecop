@@ -177,7 +177,7 @@ func InstallHooks(harness, vibecopPath string) error {
 	switch harness {
 	case HarnessClaude:
 		return installClaudeHooks(vibecopPath)
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		return installGeminiHooks(vibecopPath)
 	case HarnessCodex:
 		return installCodexHooks(vibecopPath)
@@ -252,7 +252,7 @@ func UninstallHooks(harness string) error {
 	switch harness {
 	case HarnessClaude:
 		return uninstallClaudeHooks()
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		return uninstallGeminiHooks()
 	case HarnessCodex:
 		return uninstallCodexHooks()

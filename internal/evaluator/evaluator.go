@@ -37,6 +37,8 @@ const (
 	apiFormatAnthropic = "anthropic"
 	HarnessClaude      = "claude"
 	HarnessGemini      = "gemini"
+	HarnessAntigravity = "antigravity"
+	HarnessAgy         = "agy"
 )
 
 // Client evaluates tool-use requests by calling an LLM.

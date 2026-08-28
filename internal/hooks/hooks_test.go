@@ -84,8 +84,8 @@ func TestDetectGeminiCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if harness != HarnessGemini {
-		t.Errorf("expected gemini harness, got %s", harness)
+	if harness != HarnessAntigravity {
+		t.Errorf("expected antigravity harness, got %s", harness)
 	}
 	if nr.Tool != "Bash" {
 		t.Errorf("expected tool Bash, got %s", nr.Tool)
@@ -112,6 +112,15 @@ func TestDetectWithHint(t *testing.T) {
 	}
 	if harness != HarnessClaude {
 		t.Errorf("hint should force claude, got %s", harness)
+	}
+
+	// Hint forcing antigravity
+	_, harness, err = DetectAndParse(strings.NewReader(input), HarnessAntigravity)
+	if err != nil {
+		t.Fatalf("hint parse failed: %v", err)
+	}
+	if harness != HarnessAntigravity {
+		t.Errorf("hint should force antigravity, got %s", harness)
 	}
 }
 
@@ -267,8 +276,8 @@ func TestDetectGeminiSetsBeforeToolEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if harness != HarnessGemini {
-		t.Errorf("expected gemini, got %s", harness)
+	if harness != HarnessAntigravity {
+		t.Errorf("expected antigravity, got %s", harness)
 	}
 	if nr.Event != EventBeforeTool {
 		t.Errorf("expected default BeforeTool, got %s", nr.Event)
@@ -289,7 +298,7 @@ func TestDetectClaudeWhenNoHookEventName(t *testing.T) {
 }
 
 func TestSanitizeHarnessKnownAndUnknown(t *testing.T) {
-	for _, h := range []string{HarnessClaude, HarnessGemini, HarnessCodex, HarnessCopilot} {
+	for _, h := range []string{HarnessClaude, HarnessGemini, HarnessCodex, HarnessCopilot, HarnessAntigravity, HarnessAgy} {
 		if got := SanitizeHarness(h); got != h {
 			t.Errorf("SanitizeHarness(%q) = %q; want %q", h, got, h)
 		}

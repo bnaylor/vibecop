@@ -131,6 +131,33 @@ func TestWriteVerdict(t *testing.T) {
 			wantStdout: `{"decision":"allow"}`,
 		},
 
+		// --- Antigravity BeforeTool ---
+		{
+			name:    "antigravity BeforeTool approve",
+			harness: HarnessAntigravity, event: EventBeforeTool,
+			verdict:    daemon.Verdict{Verdict: "approve", Reason: "ok"},
+			wantStdout: `{"decision":"allow","reason":"ok"}`,
+		},
+		{
+			name:    "antigravity BeforeTool approve no reason",
+			harness: HarnessAntigravity, event: EventBeforeTool,
+			verdict:    daemon.Verdict{Verdict: "approve"},
+			wantStdout: `{"decision":"allow"}`,
+		},
+		{
+			name:    "antigravity BeforeTool deny",
+			harness: HarnessAntigravity, event: EventBeforeTool,
+			verdict:    daemon.Verdict{Verdict: "deny", Reason: "blocked"},
+			wantStdout: `{"decision":"deny","reason":"blocked"}`,
+			wantStderr: "VibeCop [DENY]: blocked\n",
+		},
+		{
+			name:    "antigravity empty event defaults",
+			harness: HarnessAntigravity, event: "",
+			verdict:    daemon.Verdict{Verdict: "approve"},
+			wantStdout: `{"decision":"allow"}`,
+		},
+
 		// --- Copilot preToolUse ---
 		{
 			name:    "copilot preToolUse approve emits hint",

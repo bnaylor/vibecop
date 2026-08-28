@@ -48,6 +48,17 @@ markdown fences, or closing remarks. Output ONLY the system prompt text,
 beginning immediately with its first line and ending after its last.
 No preamble of any kind.`
 
+// findAgentCmd searches the PATH for one of the known agent binary names.
+// It prioritizes "antigravity", then "agy", falling back to "gemini".
+func findAgentCmd() string {
+	for _, cmd := range []string{"antigravity", "agy", "gemini"} {
+		if _, err := exec.LookPath(cmd); err == nil {
+			return cmd
+		}
+	}
+	return "gemini"
+}
+
 // GeneratePrompt runs the specified agent to generate a Guardian prompt.
 // extraContext is appended to the initialization prompt (used by refine).
 func GeneratePrompt(harness, extraContext string) (string, error) {
@@ -59,7 +70,7 @@ func GeneratePrompt(harness, extraContext string) (string, error) {
 	switch harness {
 	case HarnessClaude:
 		return runClaude(prompt)
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		return runGemini(prompt)
 	default:
 		return "", fmt.Errorf("unsupported harness: %s", harness)
@@ -84,18 +95,19 @@ func runClaude(prompt string) (string, error) {
 }
 
 func runGemini(prompt string) (string, error) {
-	cmd := exec.Command("gemini", "-p", prompt)
+	agentCmd := findAgentCmd()
+	cmd := exec.Command(agentCmd, "-p", prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("gemini: %w\n%s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("%s: %w\n%s", agentCmd, err, strings.TrimSpace(stderr.String()))
 	}
 
 	out := strings.TrimSpace(stdout.String())
 	if out == "" {
-		return "", fmt.Errorf("gemini produced no output")
+		return "", fmt.Errorf("%s produced no output", agentCmd)
 	}
 	return out, nil
 }

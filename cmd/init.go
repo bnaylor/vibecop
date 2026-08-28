@@ -21,7 +21,7 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize Guardian mode for the current project",
 	Long: `Analyze the current project and generate a Guardian prompt.
-An agent must be specified with --harness (claude, gemini).
+An agent must be specified with --harness (claude, antigravity, agy, gemini).
 Use --dry-run to preview without saving.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectPath, err := os.Getwd()
@@ -86,7 +86,7 @@ func confirm(prompt string) bool {
 
 func init() {
 	rootCmd.AddCommand(initCmd)
-	initCmd.Flags().StringVar(&initHarness, "harness", "", "Agent CLI to use for prompt generation (claude|gemini, or any claude-compatible wrapper)")
+	initCmd.Flags().StringVar(&initHarness, "harness", "", "Agent CLI to use for prompt generation (claude|antigravity|agy|gemini, or any claude-compatible wrapper)")
 	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "Print generated prompt without saving")
 	initCmd.MarkFlagRequired("harness")
 }

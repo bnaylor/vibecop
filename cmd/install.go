@@ -82,7 +82,7 @@ func resolveInstallTargets() []string {
 	if installAll {
 		return []string{
 			hooks.HarnessClaude,
-			hooks.HarnessGemini,
+			hooks.HarnessAntigravity,
 			hooks.HarnessCodex,
 			hooks.HarnessCopilot,
 		}
@@ -92,7 +92,7 @@ func resolveInstallTargets() []string {
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-	installCmd.Flags().StringVar(&installHarness, "harness", "", "Harness to install into (claude|gemini|codex|copilot) — use 'claude' for any claude-compatible wrapper")
+	installCmd.Flags().StringVar(&installHarness, "harness", "", "Harness to install into (claude|antigravity|agy|gemini|codex|copilot) — use 'claude' for any claude-compatible wrapper")
 	installCmd.Flags().BoolVar(&installAll, "all", false, "Install into all supported harnesses")
 	installCmd.Flags().StringVar(&installVibecopPath, "vibecop-path", "", "Path to a specific vibecop binary the hook should call (default: 'vibecop' via $PATH). Resolved to absolute.")
 }

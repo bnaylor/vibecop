@@ -55,7 +55,7 @@ func recognizedCombo(harness, event string) bool {
 		return event == "" || event == EventPreToolUse
 	case HarnessCodex:
 		return event == EventPreToolUse || event == EventPermissionRequest
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		return event == "" || event == EventBeforeTool
 	case HarnessCopilot:
 		return event == "" || event == EventCopilotPreToolUse
@@ -111,7 +111,7 @@ func approveJSON(harness, event, reason string) ([]byte, bool) {
 		case EventPermissionRequest:
 			return marshalSafe(codexPermReqAllow()), true
 		}
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		if event == "" || event == EventBeforeTool {
 			return marshalSafe(geminiDecision("allow", reason)), true
 		}
@@ -138,7 +138,7 @@ func denyJSON(harness, event, reason string) ([]byte, bool) {
 		case EventPermissionRequest:
 			return marshalSafe(codexPermReqDeny(reason)), true
 		}
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		if event == "" || event == EventBeforeTool {
 			return marshalSafe(geminiDecision("deny", reason)), true
 		}

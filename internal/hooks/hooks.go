@@ -65,11 +65,13 @@ type NormalizedRequest struct {
 
 // Harness identifiers.
 const (
-	HarnessClaude  = "claude"
-	HarnessGemini  = "gemini"
-	HarnessCodex   = "codex"
-	HarnessCopilot = "copilot"
-	HarnessUnknown = ""
+	HarnessClaude      = "claude"
+	HarnessGemini      = "gemini"
+	HarnessCodex       = "codex"
+	HarnessCopilot     = "copilot"
+	HarnessAntigravity = "antigravity"
+	HarnessAgy         = "agy"
+	HarnessUnknown     = ""
 )
 
 // Hook event names. Casing matches each harness's wire format.
@@ -86,7 +88,7 @@ const (
 // UDS client can't blow up the dashboard with arbitrary harness strings.
 func SanitizeHarness(harness string) string {
 	switch harness {
-	case HarnessClaude, HarnessGemini, HarnessCodex, HarnessCopilot:
+	case HarnessClaude, HarnessGemini, HarnessCodex, HarnessCopilot, HarnessAntigravity, HarnessAgy:
 		return harness
 	}
 	return ""
@@ -108,7 +110,7 @@ func defaultEventFor(harness string) string {
 	switch harness {
 	case HarnessClaude:
 		return EventPreToolUse
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		return EventBeforeTool
 	case HarnessCopilot:
 		return EventCopilotPreToolUse
@@ -176,7 +178,7 @@ func DetectAndParse(r io.Reader, harnessHint string) (*NormalizedRequest, string
 		case EventPermissionRequest:
 			return parseWithFormat(raw, HarnessCodex)
 		case EventBeforeTool:
-			return parseWithFormat(raw, HarnessGemini)
+			return parseWithFormat(raw, HarnessAntigravity)
 		case EventPreToolUse:
 			if _, ok := probe["turn_id"]; ok {
 				return parseWithFormat(raw, HarnessCodex)
@@ -201,7 +203,7 @@ func parseWithFormat(raw, harness string) (*NormalizedRequest, string, error) {
 			return nil, harness, fmt.Errorf("claude payload missing tool_name")
 		}
 		return normalizeClaudeCode(p), harness, nil
-	case HarnessGemini:
+	case HarnessGemini, HarnessAntigravity, HarnessAgy:
 		var p GeminiCLIPayload
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			return nil, harness, fmt.Errorf("gemini payload: %w", err)

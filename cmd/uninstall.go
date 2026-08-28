@@ -16,7 +16,7 @@ var uninstallCmd = &cobra.Command{
 	Long:  "Remove vibecop hook entries from the specified harness settings file.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if uninstallHarness == "" {
-			return fmt.Errorf("specify --harness (claude|gemini)")
+			return fmt.Errorf("specify --harness (claude|antigravity|agy|gemini)")
 		}
 
 		if err := hooks.UninstallHooks(uninstallHarness); err != nil {
@@ -29,6 +29,6 @@ var uninstallCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(uninstallCmd)
-	uninstallCmd.Flags().StringVar(&uninstallHarness, "harness", "", "Harness to remove from (claude|gemini)")
+	uninstallCmd.Flags().StringVar(&uninstallHarness, "harness", "", "Harness to remove from (claude|antigravity|agy|gemini)")
 	uninstallCmd.MarkFlagRequired("harness")
 }
