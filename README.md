@@ -67,15 +67,21 @@ Speed matters — `vibecop` is in your agent's critical path. Measured on M4 Pro
 Requires Go 1.25+ (see `go.mod` for the current toolchain version).
 
 ```sh
-go build -o ./vibecop ./cmd/vibecop
+make build
 ```
 
-No CGO, external libraries, or build tags needed. The binary is statically linked by default.
+No CGO, external libraries, or build tags needed. The binary is statically linked by default. On macOS, `make build` ad-hoc signs the binary so it runs from any path (including `~/bin/`).
 
 To install directly into your `$GOPATH`:
 
 ```sh
 go install ./cmd/vibecop
+```
+
+On macOS, ad-hoc sign the installed binary if you move it:
+
+```sh
+codesign --sign - $(which vibecop)
 ```
 
 ---
@@ -122,7 +128,7 @@ through `$PATH`. Pass `--vibecop-path` to either `vibecop setup` or
 testing a local build without overwriting the system install:
 
 ```sh
-go build -o ./vibecop ./cmd/vibecop
+make build
 vibecop install --all --vibecop-path ./vibecop
 ```
 
