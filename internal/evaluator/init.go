@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -40,6 +41,13 @@ Then write a system prompt for VibeCop. The prompt must:
     { "verdict": "approve" | "deny" | "escalate", "reason": "..." }
 - Instruct VibeCop: when in doubt, escalate rather than deny; never approve
   operations that touch files or network resources clearly outside the project.
+- Instruct VibeCop on the deny/escalate boundary: deny is terminal and prompts
+  no human, so reserve it for actions no user instruction should clear
+  (credential theft, exfiltration, destroying data outside the project).
+  Everything else worrying — home-directory and agent-config writes, global
+  installs, irreversible-looking commands — goes to escalate, because the user
+  may have asked for it. A deny the user wanted just moves the action to a
+  plain shell where VibeCop sees nothing.
 
 CRITICAL: Your output will be saved verbatim as the VibeCop system prompt file.
 Start with "You are VibeCop" as the very first line. Do NOT include any
@@ -48,15 +56,61 @@ markdown fences, or closing remarks. Output ONLY the system prompt text,
 beginning immediately with its first line and ending after its last.
 No preamble of any kind.`
 
-// findAgentCmd searches the PATH for one of the known agent binary names.
-// It prioritizes "antigravity", then "agy", falling back to "gemini".
-func findAgentCmd() string {
-	for _, cmd := range []string{"antigravity", "agy", "gemini"} {
-		if _, err := exec.LookPath(cmd); err == nil {
-			return cmd
-		}
+// agentInvocation describes how to drive a harness CLI headlessly for
+// prompt generation. binaries are tried in order and the first one on PATH
+// wins — the list only ever holds alias names for the *same* CLI, never a
+// different vendor's. Picking whatever agent happens to be installed would
+// silently ignore the --harness value the caller passed.
+type agentInvocation struct {
+	binaries []string
+	args     func(prompt string) []string
+}
+
+var agentInvocations = map[string]agentInvocation{
+	HarnessClaude: {
+		binaries: []string{"claude"},
+		args:     func(p string) []string { return []string{"-p", p, "--output-format", "text"} },
+	},
+	HarnessGemini: {
+		binaries: []string{"gemini"},
+		args:     func(p string) []string { return []string{"-p", p} },
+	},
+	// Antigravity installs under either name depending on how it was
+	// fetched; both keys resolve to the same CLI, preferring their own
+	// spelling.
+	HarnessAntigravity: {
+		binaries: []string{"antigravity", "agy"},
+		args:     func(p string) []string { return []string{"-p", p} },
+	},
+	HarnessAgy: {
+		binaries: []string{"agy", "antigravity"},
+		args:     func(p string) []string { return []string{"-p", p} },
+	},
+	// codex/copilot use each vendor's documented headless invocation but
+	// have not been exercised end-to-end here (issue #28). init prints the
+	// generated prompt for review before saving, so a wrong flag or a
+	// session preamble in the output shows up rather than being written
+	// silently to system-prompt.md.
+	HarnessCodex: {
+		binaries: []string{"codex"},
+		args:     func(p string) []string { return []string{"exec", p} },
+	},
+	HarnessCopilot: {
+		binaries: []string{"copilot"},
+		args:     func(p string) []string { return []string{"-p", p, "--allow-all-tools"} },
+	},
+}
+
+// SupportedHarnesses returns the harness values GeneratePrompt accepts,
+// sorted. Single source of truth for the --harness help text and the
+// unsupported-value error, so the two can't drift from the real set.
+func SupportedHarnesses() []string {
+	out := make([]string, 0, len(agentInvocations))
+	for h := range agentInvocations {
+		out = append(out, h)
 	}
-	return "gemini"
+	sort.Strings(out)
+	return out
 }
 
 // GeneratePrompt runs the specified agent to generate a Guardian prompt.
@@ -67,47 +121,42 @@ func GeneratePrompt(harness, extraContext string) (string, error) {
 		prompt += "\n\n" + extraContext
 	}
 
-	switch harness {
-	case HarnessClaude:
-		return runClaude(prompt)
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
-		return runGemini(prompt)
-	default:
-		return "", fmt.Errorf("unsupported harness: %s", harness)
+	inv, ok := agentInvocations[harness]
+	if !ok {
+		return "", fmt.Errorf("unsupported harness: %s (want one of: %s)",
+			harness, strings.Join(SupportedHarnesses(), ", "))
 	}
+
+	bin, err := resolveBinary(inv.binaries)
+	if err != nil {
+		return "", fmt.Errorf("harness %s: %w", harness, err)
+	}
+	return runAgent(bin, inv.args(prompt))
 }
 
-func runClaude(prompt string) (string, error) {
-	cmd := exec.Command("claude", "-p", prompt, "--output-format", "text")
+// resolveBinary returns the first candidate found on PATH.
+func resolveBinary(candidates []string) (string, error) {
+	for _, c := range candidates {
+		if _, err := exec.LookPath(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("not on PATH (looked for: %s)", strings.Join(candidates, ", "))
+}
+
+func runAgent(bin string, args []string) (string, error) {
+	cmd := exec.Command(bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("claude: %w\n%s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("%s: %w\n%s", bin, err, strings.TrimSpace(stderr.String()))
 	}
 
 	out := strings.TrimSpace(stdout.String())
 	if out == "" {
-		return "", fmt.Errorf("claude produced no output")
-	}
-	return out, nil
-}
-
-func runGemini(prompt string) (string, error) {
-	agentCmd := findAgentCmd()
-	cmd := exec.Command(agentCmd, "-p", prompt)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s: %w\n%s", agentCmd, err, strings.TrimSpace(stderr.String()))
-	}
-
-	out := strings.TrimSpace(stdout.String())
-	if out == "" {
-		return "", fmt.Errorf("%s produced no output", agentCmd)
+		return "", fmt.Errorf("%s produced no output", bin)
 	}
 	return out, nil
 }

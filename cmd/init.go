@@ -21,7 +21,8 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize Guardian mode for the current project",
 	Long: `Analyze the current project and generate a Guardian prompt.
-An agent must be specified with --harness (claude, antigravity, agy, gemini).
+An agent must be specified with --harness; the named CLI is the one that
+runs — there is no fallback to whatever else is installed.
 Use --dry-run to preview without saving.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectPath, err := os.Getwd()
@@ -76,6 +77,14 @@ Use --dry-run to preview without saving.`,
 	},
 }
 
+// harnessFlagUsage builds the --harness help text from the harnesses
+// GeneratePrompt actually supports, so help can't advertise a value that
+// then hard-errors.
+func harnessFlagUsage(purpose string) string {
+	return fmt.Sprintf("Agent CLI to use for %s (%s)", purpose,
+		strings.Join(evaluator.SupportedHarnesses(), "|"))
+}
+
 func confirm(prompt string) bool {
 	fmt.Fprintf(os.Stderr, "%s [Y/n] ", prompt)
 	reader := bufio.NewReader(os.Stdin)
@@ -86,7 +95,7 @@ func confirm(prompt string) bool {
 
 func init() {
 	rootCmd.AddCommand(initCmd)
-	initCmd.Flags().StringVar(&initHarness, "harness", "", "Agent CLI to use for prompt generation (claude|antigravity|agy|gemini, or any claude-compatible wrapper)")
+	initCmd.Flags().StringVar(&initHarness, "harness", "", harnessFlagUsage("prompt generation"))
 	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "Print generated prompt without saving")
 	initCmd.MarkFlagRequired("harness")
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +27,11 @@ type evalClient interface {
 }
 
 const maxConsecutiveFailures = 3
+
+// telemetryFlushInterval bounds how much buffered telemetry a hard kill can
+// destroy. Shutdown-time draining only covers exits that let d.Run() return;
+// SIGKILL (a supervisor's stop-timeout escalation) and panics never do.
+const telemetryFlushInterval = 30 * time.Second
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -89,11 +95,43 @@ var startCmd = &cobra.Command{
 			if tp != nil {
 				_ = tp.Shutdown(tpCtx)
 			}
+			// A live instance owning the socket is still a failure to start:
+			// returning an error exits non-zero, so a supervisor's
+			// KeepAlive/Restart policy doesn't read "nothing started" as
+			// success and leave the daemon down.
+			var running *daemon.AlreadyRunningError
+			if errors.As(err, &running) {
+				return fmt.Errorf("%v — refusing to start a second instance (run 'vibecop stop' first)", running)
+			}
 			return fmt.Errorf("daemon start: %w", err)
 		}
 
 		fmt.Fprintf(os.Stderr, "vibecop: daemon started (pid %d)\n", os.Getpid())
+
+		// Bound the unflushed telemetry window. Stopped before the
+		// shutdown-time drain below so the two never race.
+		flushDone := make(chan struct{})
+		if tp != nil {
+			go func() {
+				ticker := time.NewTicker(telemetryFlushInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-flushDone:
+						return
+					case <-ticker.C:
+						ctx, cancel := context.WithTimeout(context.Background(), telemetryFlushInterval)
+						if err := tp.ForceFlush(ctx); err != nil {
+							log.Printf("telemetry: periodic flush: %v", err)
+						}
+						cancel()
+					}
+				}
+			}()
+		}
+
 		runErr := d.Run()
+		close(flushDone)
 
 		// Daemon has fully shut down (evtCh closed, otlpCh closed). Drain
 		// the log subscriber, then flush telemetry SDK.
