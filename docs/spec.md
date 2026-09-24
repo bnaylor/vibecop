@@ -98,12 +98,12 @@ The SHA256 of the absolute project path provides a stable, collision-free key.
 ## CLI Subcommands
 
 ```
-vibecop start              Start the background daemon (detaches)
+vibecop start              Start the daemon (runs in the foreground; supervise it with launchd/systemd)
 vibecop stop               Stop the background daemon
 vibecop status             Show daemon status, current config, active project
 vibecop tui                Attach the TUI to a running daemon
 vibecop init               Initialize Guardian mode for the current project
-  --harness  claude|codex|gemini|copilot   Agent to use for prompt generation (required)
+  --harness  claude|codex|gemini|copilot|antigravity|agy   Agent to use for prompt generation (required)
   --dry-run                           Print generated prompt without saving
 vibecop install            Install hook scripts into the coding harness configs
   --harness  claude|codex|gemini|copilot   Harness to install into (required or --all)
@@ -126,6 +126,20 @@ A long-running Go process that:
 - Looks up the project's Guardian prompt (or falls back to Baseline) per request
 - Calls the configured LLM API and returns a verdict
 - Writes audit records when enabled
+
+#### Start and supervision
+
+`vibecop start` runs in the foreground and is meant to be supervised
+(launchd `KeepAlive`, systemd `Restart=`). Its startup contract exists to
+keep a supervisor honest:
+
+- An existing socket file is not evidence of a running daemon. `Start`
+  probes it by connecting. No one listening -> the socket, and an orphan PID
+  file whose process is gone, are reaped and startup proceeds.
+- A live owner -> `*daemon.AlreadyRunningError`, a message on stderr, and a
+  **non-zero exit**. A clean exit here would tell `KeepAlive` the job
+  succeeded and leave nothing running.
+- `Start` never unlinks a socket a live daemon is serving.
 
 ### IPC Protocol
 
@@ -311,10 +325,25 @@ Active when `~/.vibecop/projects/<sha256>/system-prompt.md` exists. Uses the pro
 claude -p "<initialization prompt>" --output-format text
 ```
 
-**Gemini CLI:**
+**Gemini CLI (also `antigravity` / `agy`, which take the same flag):**
 ```
 gemini -p "<initialization prompt>"
 ```
+
+**Codex CLI:**
+```
+codex exec "<initialization prompt>"
+```
+
+**Copilot CLI:**
+```
+copilot -p "<initialization prompt>" --allow-all-tools
+```
+
+The `--harness` value selects the binary; there is no fallback to whichever
+agent happens to be installed. `antigravity` and `agy` are aliases for the
+same CLI and resolve to each other. If the named binary is not on PATH,
+init fails naming what it looked for.
 
 The agent reads the project, generates a system prompt, and prints it to stdout. `vibecop` captures stdout, displays it for review, and saves it to `~/.vibecop/projects/<sha256>/system-prompt.md` on confirmation.
 
@@ -344,6 +373,10 @@ To do this:
 3. Note any existing agent configuration (hooks, permissions) that hints at what
    kinds of tool use are already expected.
 
+CRITICAL: Always allow the project's own build toolchain (e.g., go, swift,
+cargo, npm) even in early/empty project states — the first thing after init is
+building the project itself.
+
 Then write a system prompt for VibeCop. The prompt must:
 - Explain VibeCop's role: second-opinion AI for tool-use approvals, no shared
   context with the primary agent, conservative by design.
@@ -355,6 +388,13 @@ Then write a system prompt for VibeCop. The prompt must:
     { "verdict": "approve" | "deny" | "escalate", "reason": "..." }
 - Instruct VibeCop: when in doubt, escalate rather than deny; never approve
   operations that touch files or network resources clearly outside the project.
+- Instruct VibeCop on the deny/escalate boundary: deny is terminal and prompts
+  no human, so reserve it for actions no user instruction should clear
+  (credential theft, exfiltration, destroying data outside the project).
+  Everything else worrying — home-directory and agent-config writes, global
+  installs, irreversible-looking commands — goes to escalate, because the user
+  may have asked for it. A deny the user wanted just moves the action to a
+  plain shell where VibeCop sees nothing.
 
 CRITICAL: Your output will be saved verbatim as the VibeCop system prompt file.
 Start with "You are VibeCop" as the very first line. Do NOT include any
@@ -376,22 +416,37 @@ to a human.
 You have no specific knowledge of the current project. Apply conservative
 baseline rules:
 
-DENY immediately (these are almost always unintentional or malicious):
+Deny is terminal: the agent is refused and no human is ever prompted.
+Escalate hands the decision to the human, who can approve it. So deny is
+correct only where no user instruction should clear the action. Anything a
+present human might legitimately have asked for goes to escalate — even when
+it is irreversible, outside the project, or alarming. A deny the human
+actually wanted does not stop the action; it pushes them to run it in a plain
+shell, where you see nothing at all.
+
+DENY immediately (no plausible user instruction makes these acceptable):
 - Recursive deletion of paths at or above the home directory
-- Commands that read from or write to ~/.ssh, ~/.gnupg, credential stores, or
-  keychain databases
+- Commands that read from or write to ~/.ssh, ~/.gnupg, credential stores,
+  keychain databases, or cloud provider credential files
+  (~/.aws/credentials, ~/.config/gcloud, and similar)
 - Network requests to IP addresses or domains that look like exfiltration targets
   (non-local IPs from a shell command that also reads project files)
+
+ESCALATE (surface to the human — they may have asked for exactly this):
+- Any operation you cannot categorize confidently
 - Commands that modify shell startup files (.bashrc, .zshrc, .profile, etc.)
+- Writes to agent or tool configuration under the home directory
+  (~/.claude/, ~/.codex/, ~/.config/, ~/.gitconfig, and similar), including
+  installing hooks or session scripts
 - Package installs that add globally visible binaries outside a known package
   manager workflow
-
-ESCALATE (uncertain — surface to human):
-- Any operation you cannot categorize confidently
+- Killing or signalling processes (kill, pkill, skill) that were not started
+  by or for the current work session, or whose target is ambiguous
 - Unusual combinations of file reads and outbound network activity
-- Operations on paths well outside the apparent working directory
-- Any destructive operation (delete, overwrite) on files not created in this
-  session
+- Operations on paths well outside the apparent working directory,
+  including any deletion, creation, or modification outside the project
+- Any destructive operation (delete, overwrite, truncate, rename, move) on
+  files outside the current project directory
 
 APPROVE everything else automatically.
 
@@ -551,6 +606,16 @@ the daemon's UDS server starts accepting. Shutdown sequence:
 3. The log subscriber goroutine exits.
 4. `Provider.Shutdown` flushes pending traces, metrics, and logs (3 s
    per provider) and tears down the SDK.
+
+That sequence only runs on exits that let `d.Run()` return. Two mechanisms
+back it up for exits that do not:
+
+- `d.Run()` also shuts down on **SIGHUP**, so a closing controlling terminal
+  drains like a clean stop instead of dropping the last window.
+- `cmd start` calls `Provider.ForceFlush` every 30 s
+  (`telemetryFlushInterval`), bounding what a SIGKILL or a panic can destroy
+  to that window. `ForceFlush` is nil-safe and is not a teardown - the
+  provider stays usable afterwards.
 
 ## Connection Testing
 

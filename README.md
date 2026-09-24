@@ -115,12 +115,26 @@ vibecop start              # boot the daemon (foreground; Ctrl+C to stop)
 vibecop tui                # (another terminal) watch verdicts in real-time
 ```
 
+### Running it under a supervisor
+
+`vibecop start` runs in the foreground, so launchd/systemd can own its
+lifecycle. It is safe to point `KeepAlive` (macOS) or `Restart=on-failure`
+(systemd) at it: a socket file left behind by an unclean death is reaped
+rather than mistaken for a running daemon, and if a live daemon really does
+own the socket, `start` says so on stderr and exits non-zero instead of
+handing the supervisor a clean exit with nothing running.
+
 Then for full integration with coding agents:
 
 ```sh
 vibecop install --all      # wire hooks into Claude Code, Codex, Gemini CLI, Copilot CLI
 vibecop init --harness claude   # generate Guardian prompt for this project
 ```
+
+`--harness` takes `claude`, `gemini`, `codex`, `copilot`, `antigravity`, or
+`agy`, and names the CLI that actually runs — it does not fall back to
+whichever agent happens to be installed. `antigravity` and `agy` are the two
+names for the same CLI.
 
 By default the installed hook calls `vibecop hook` and resolves the binary
 through `$PATH`. Pass `--vibecop-path` to either `vibecop setup` or
@@ -196,7 +210,7 @@ Attaches to a running daemon and shows:
 
 ```
 vibecop setup              Interactive first-time setup wizard
-vibecop start              Start the background daemon
+vibecop start              Start the daemon (foreground; supervise with launchd/systemd)
 vibecop stop               Stop it
 vibecop status             Show daemon status and config
 vibecop tui                Attach the live TUI

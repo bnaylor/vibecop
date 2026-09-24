@@ -117,6 +117,40 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (*Provider, error) {
 	return p, nil
 }
 
+// ForceFlush pushes everything currently buffered to the configured
+// targets without tearing the providers down. Safe on a nil receiver.
+//
+// The daemon calls this on a timer so the worst-case loss window is
+// bounded no matter how the process dies — SIGKILL and panics never reach
+// Shutdown, and batch processors would otherwise hold the last window
+// forever.
+func (p *Provider) ForceFlush(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	var firstErr error
+	flush := func(f func(context.Context) error) {
+		if f == nil {
+			return
+		}
+		c, cancel := context.WithTimeout(ctx, shutdownTimeout)
+		defer cancel()
+		if err := f(c); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if p.tp != nil {
+		flush(p.tp.ForceFlush)
+	}
+	if p.mp != nil {
+		flush(p.mp.ForceFlush)
+	}
+	if p.lp != nil {
+		flush(p.lp.ForceFlush)
+	}
+	return firstErr
+}
+
 // Shutdown flushes pending telemetry and tears down the providers. Safe to
 // call on a nil receiver.
 func (p *Provider) Shutdown(ctx context.Context) error {

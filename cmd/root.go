@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	cfgFile   string
+	cfgFile    string
 	vibecopCfg config.Config
 )
 
@@ -20,6 +20,11 @@ var rootCmd = &cobra.Command{
 	Long: `vibecop is a daemon that reviews tool-use requests from coding agents
 and provides fast, independent approve/deny/escalate verdicts.
 Runs in the background; attach the TUI to monitor activity.`,
+	// A runtime failure is not a usage error. Without these, a daemon that
+	// declined to start buried its one-line reason under a flag dump and
+	// printed it twice (cobra, then Execute).
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		path := cfgFile
 		if path == "" {
@@ -76,7 +81,7 @@ func shouldTriggerSetup(cmdName string) bool {
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintf(os.Stderr, "vibecop: %v\n", err)
 		os.Exit(1)
 	}
 }

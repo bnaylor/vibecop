@@ -13,9 +13,15 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bnaylor/vibecop/internal/config"
 )
+
+// dialProbeTimeout caps the liveness probe against an existing socket.
+// Local UDS connects are sub-millisecond; this only bounds pathological
+// cases so start can never hang behind a wedged socket.
+const dialProbeTimeout = 250 * time.Millisecond
 
 // Message types.
 const (
@@ -178,11 +184,61 @@ func (d *Daemon) RegisterOTLPSubscriber() <-chan Event {
 	return d.otlpCh
 }
 
-// Start binds the socket and begins accepting connections.
-func (d *Daemon) Start() error {
-	// Remove stale socket.
+// AlreadyRunningError is returned by Start when a live daemon is already
+// listening on the socket. Callers must surface it and exit non-zero: a
+// clean exit tells launchd/systemd "the job succeeded, don't restart",
+// which is exactly wrong when nothing was started.
+type AlreadyRunningError struct {
+	PID        int
+	SocketPath string
+}
+
+func (e *AlreadyRunningError) Error() string {
+	if e.PID > 0 {
+		return fmt.Sprintf("daemon already running (pid %d) on %s", e.PID, e.SocketPath)
+	}
+	return fmt.Sprintf("daemon already running on %s", e.SocketPath)
+}
+
+// socketOwnerAlive reports whether a process is currently listening on the
+// socket. Connecting is the authoritative test — a socket file left behind
+// by a dead daemon still stats fine but refuses connections. Never trust
+// the file's existence alone.
+func socketOwnerAlive(path string) bool {
+	conn, err := net.DialTimeout("unix", path, dialProbeTimeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// reapStale removes an orphaned socket file, and the PID file beside it
+// when its recorded process is gone. Called only after socketOwnerAlive
+// has said no one is home.
+func (d *Daemon) reapStale() error {
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale socket: %w", err)
+	}
+	pid, err := ReadPID(d.socketPath)
+	if err != nil || !ProcessExists(pid) {
+		os.Remove(d.pidPath())
+	}
+	log.Printf("daemon: reaped stale socket %s", d.socketPath)
+	return nil
+}
+
+// Start binds the socket and begins accepting connections. A socket file
+// with no live owner is reaped; a live owner yields *AlreadyRunningError.
+func (d *Daemon) Start() error {
+	if _, statErr := os.Stat(d.socketPath); statErr == nil {
+		if socketOwnerAlive(d.socketPath) {
+			pid, _ := ReadPID(d.socketPath)
+			return &AlreadyRunningError{PID: pid, SocketPath: d.socketPath}
+		}
+		if err := d.reapStale(); err != nil {
+			return err
+		}
 	}
 
 	// Ensure parent directory exists.
@@ -246,9 +302,12 @@ func (d *Daemon) Run() error {
 		return fmt.Errorf("daemon not started")
 	}
 
-	// Handle OS signals for graceful shutdown.
+	// Handle OS signals for graceful shutdown. SIGHUP is included so a
+	// closing controlling terminal drains like a clean stop instead of
+	// killing the process with buffered telemetry still unsent.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
 
 	// Wait for shutdown signal.
 	select {
@@ -256,7 +315,10 @@ func (d *Daemon) Run() error {
 		log.Printf("daemon: received signal %v", sig)
 	case <-d.quit:
 	}
-	return d.shutdown()
+	// Stop, not shutdown: the accept loop exits on d.quit, and the signal
+	// path must close it too. Calling shutdown() directly left the loop
+	// spinning on a closed listener, logging an accept error per iteration.
+	return d.Stop()
 }
 
 // Stop signals the daemon to shut down. Idempotent.
@@ -325,7 +387,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 	// connection is harmless. Log and move on.
 	defer func() {
 		if r := recover(); r != nil {
-		log.Printf("daemon: handler panic recovered: %v", r)
+			log.Printf("daemon: handler panic recovered: %v", r)
 		}
 	}()
 
@@ -439,7 +501,7 @@ func handleTUISubscribe(conn net.Conn, d *Daemon) {
 	for evt := range ch {
 		data, err := json.Marshal(evt)
 		if err != nil {
-		continue
+			continue
 		}
 		data = append(data, '\n')
 		if _, err := conn.Write(data); err != nil {
@@ -459,20 +521,20 @@ func (d *Daemon) broadcastEvents(evtCh chan Event) {
 	for evt := range evtCh {
 		d.subsMu.Lock()
 		for ch := range d.subs {
-		select {
+			select {
 			case ch <- evt:
-		default:
+			default:
 				// Drop for slow subscribers.
-		}
+			}
 		}
 		d.subsMu.Unlock()
 
 		if d.otlpCh != nil {
-		select {
+			select {
 			case d.otlpCh <- evt:
-		default:
+			default:
 				// Drop for slow OTLP exporter — fail-open.
-		}
+			}
 		}
 	}
 	if d.otlpCh != nil {

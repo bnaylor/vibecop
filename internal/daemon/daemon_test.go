@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -91,8 +93,8 @@ func TestPermissionRequest(t *testing.T) {
 }
 
 func TestPermissionRequestNoHandler(t *testing.T) {
-		dir := shortTempDir(t)
-		socketPath := filepath.Join(dir, "d.sock")
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
 	cfg := config.DefaultConfig()
 	d := New(socketPath, cfg)
 	// No handler registered.
@@ -551,8 +553,6 @@ func TestRequestHarnessAndHookEventRoundTrip(t *testing.T) {
 	}
 }
 
-
-
 func TestEventHarnessAndHookEventRoundTrip(t *testing.T) {
 	d, socketPath := newTestDaemon(t)
 	defer d.Stop()
@@ -581,4 +581,85 @@ func TestEventHarnessAndHookEventRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStartReapsStaleSocket(t *testing.T) {
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
 
+	// An orphan socket file plus a PID file for a process that is gone —
+	// exactly what an unclean death leaves behind.
+	if err := os.WriteFile(socketPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := findDeadPID(t)
+	if err := os.WriteFile(PIDPath(socketPath), []byte(strconv.Itoa(deadPID)+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(socketPath, config.DefaultConfig())
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start should reap a stale socket, got: %v", err)
+	}
+	t.Cleanup(func() { d.Stop() })
+
+	pid, err := ReadPID(socketPath)
+	if err != nil {
+		t.Fatalf("read pid: %v", err)
+	}
+	if pid != os.Getpid() {
+		t.Errorf("stale PID file not replaced: got %d, want %d", pid, os.Getpid())
+	}
+}
+
+func TestStartRefusesWhenOwnerAlive(t *testing.T) {
+	first, socketPath := newTestDaemon(t)
+	defer first.Stop()
+
+	second := New(socketPath, config.DefaultConfig())
+	err := second.Start()
+	if err == nil {
+		second.Stop()
+		t.Fatal("second Start should fail while the first daemon owns the socket")
+	}
+
+	var running *AlreadyRunningError
+	if !errors.As(err, &running) {
+		t.Fatalf("want *AlreadyRunningError, got %T: %v", err, err)
+	}
+	if running.PID != os.Getpid() {
+		t.Errorf("error should carry the owner pid: got %d, want %d", running.PID, os.Getpid())
+	}
+
+	// The live daemon must still be serving — a refused start must not
+	// have unlinked the socket out from under it.
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("first daemon no longer reachable after refused start: %v", err)
+	}
+	conn.Close()
+}
+
+func TestSocketOwnerAliveOnStaleFile(t *testing.T) {
+	dir := shortTempDir(t)
+	socketPath := filepath.Join(dir, "d.sock")
+	if err := os.WriteFile(socketPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if socketOwnerAlive(socketPath) {
+		t.Error("a plain file that nobody is listening on is not a live owner")
+	}
+	if socketOwnerAlive(filepath.Join(dir, "missing.sock")) {
+		t.Error("a missing socket is not a live owner")
+	}
+}
+
+// findDeadPID returns a PID with no live process behind it.
+func findDeadPID(t *testing.T) int {
+	t.Helper()
+	for pid := 40000; pid < 65000; pid++ {
+		if !ProcessExists(pid) {
+			return pid
+		}
+	}
+	t.Skip("no free PID found for stale-PID-file test")
+	return 0
+}

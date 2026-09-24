@@ -39,6 +39,8 @@ const (
 	HarnessGemini      = "gemini"
 	HarnessAntigravity = "antigravity"
 	HarnessAgy         = "agy"
+	HarnessCodex       = "codex"
+	HarnessCopilot     = "copilot"
 )
 
 // Client evaluates tool-use requests by calling an LLM.
