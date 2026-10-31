@@ -147,6 +147,14 @@ func geminiSettingsPath() (string, error) {
 	return filepath.Join(home, ".gemini", "settings.json"), nil
 }
 
+func antigravityHooksPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".gemini", "config", "hooks.json"), nil
+}
+
 func codexSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -177,8 +185,10 @@ func InstallHooks(harness, vibecopPath string) error {
 	switch harness {
 	case HarnessClaude:
 		return installClaudeHooks(vibecopPath)
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		return installGeminiHooks(vibecopPath)
+	case HarnessAntigravity, HarnessAgy:
+		return installAntigravityHooks(vibecopPath)
 	case HarnessCodex:
 		return installCodexHooks(vibecopPath)
 	case HarnessCopilot:
@@ -247,13 +257,47 @@ func installGeminiHooks(vibecopPath string) error {
 	return writeRawJSON(path, raw)
 }
 
+func installAntigravityHooks(vibecopPath string) error {
+	path, err := antigravityHooksPath()
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+
+	raw, err := readRawJSON(path)
+	if err != nil {
+		return err
+	}
+
+	// Antigravity hooks.json maps top-level hook group names directly to
+	// event arrays (no top-level "hooks" wrapper).
+	group, _ := raw["vibecop"].(map[string]any)
+	if group == nil {
+		group = map[string]any{}
+	}
+	entries := rawSlice(group["PreToolUse"])
+
+	updated, changed := upsertNestedHookWithMatcher(entries, "*", hookCommand(vibecopPath))
+	if !changed {
+		return nil
+	}
+	group["PreToolUse"] = updated
+	raw["vibecop"] = group
+	return writeRawJSON(path, raw)
+}
+
 // UninstallHooks removes vibecop hooks from the specified harness's settings.
 func UninstallHooks(harness string) error {
 	switch harness {
 	case HarnessClaude:
 		return uninstallClaudeHooks()
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		return uninstallGeminiHooks()
+	case HarnessAntigravity, HarnessAgy:
+		return uninstallAntigravityHooks()
 	case HarnessCodex:
 		return uninstallCodexHooks()
 	case HarnessCopilot:
@@ -337,6 +381,42 @@ func uninstallGeminiHooks() error {
 		delete(raw, "hooks")
 	} else {
 		raw["hooks"] = hooksMap
+	}
+	return writeRawJSON(path, raw)
+}
+
+func uninstallAntigravityHooks() error {
+	path, err := antigravityHooksPath()
+	if err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+
+	raw, err := readRawJSON(path)
+	if err != nil {
+		return err
+	}
+
+	group, ok := raw["vibecop"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	entries := rawSlice(group["PreToolUse"])
+	filtered := removeNestedVibecopEntries(entries)
+	if len(filtered) == 0 {
+		delete(group, "PreToolUse")
+	} else {
+		group["PreToolUse"] = filtered
+	}
+
+	if len(group) == 0 {
+		delete(raw, "vibecop")
+	} else {
+		raw["vibecop"] = group
 	}
 	return writeRawJSON(path, raw)
 }
@@ -529,6 +609,10 @@ func rawSlice(v any) []any {
 // the entry, the inner hook, and any later inner hooks the user authored.
 // Returns the (possibly extended) entries slice and a `changed` flag.
 func upsertNestedHook(entries []any, want string) ([]any, bool) {
+	return upsertNestedHookWithMatcher(entries, "", want)
+}
+
+func upsertNestedHookWithMatcher(entries []any, matcher, want string) ([]any, bool) {
 	for i, e := range entries {
 		entry, ok := e.(map[string]any)
 		if !ok {
@@ -556,7 +640,7 @@ func upsertNestedHook(entries []any, want string) ([]any, bool) {
 		return entries, true
 	}
 	return append(entries, map[string]any{
-		"matcher": "",
+		"matcher": matcher,
 		"hooks":   []any{map[string]any{"type": "command", "command": want}},
 	}), true
 }

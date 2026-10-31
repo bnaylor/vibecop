@@ -119,6 +119,25 @@ func TestAgentInvocationHonorsHarnessValue(t *testing.T) {
 	}
 }
 
+func TestAntigravityIncludesJetskiBinaryCandidate(t *testing.T) {
+	for _, h := range []string{HarnessAntigravity, HarnessAgy} {
+		inv, ok := agentInvocations[h]
+		if !ok {
+			t.Fatalf("missing invocation for %s", h)
+		}
+		var hasJetski bool
+		for _, b := range inv.binaries {
+			if b == "jetski" {
+				hasJetski = true
+				break
+			}
+		}
+		if !hasJetski {
+			t.Errorf("%s binaries %v should include 'jetski' fallback", h, inv.binaries)
+		}
+	}
+}
+
 // TestSupportedHarnessesCoversHookHarnesses guards the reported mismatch
 // between the harnesses hooks can be installed for and the harnesses a
 // Guardian prompt can be generated for.

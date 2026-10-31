@@ -35,8 +35,8 @@ ESCALATE (surface to the human — they may have asked for exactly this):
 - Any operation you cannot categorize confidently
 - Commands that modify shell startup files (.bashrc, .zshrc, .profile, etc.)
 - Writes to agent or tool configuration under the home directory
-  (~/.claude/, ~/.codex/, ~/.config/, ~/.gitconfig, and similar), including
-  installing hooks or session scripts
+  (~/.claude/, ~/.codex/, ~/.gemini/, ~/.config/, ~/.gitconfig, and similar),
+  including installing hooks or session scripts
 - Package installs that add globally visible binaries outside a known package
   manager workflow
 - Killing or signalling processes (kill, pkill, skill) that were not started

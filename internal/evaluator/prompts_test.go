@@ -42,6 +42,7 @@ func TestBaselineEscalatesHomeDirWrites(t *testing.T) {
 	for _, pattern := range []string{
 		".bashrc",
 		"~/.claude/",
+		"~/.gemini/",
 		"Package installs",
 		"kill, pkill",
 	} {

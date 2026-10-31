@@ -23,8 +23,8 @@ var hookCmd = &cobra.Command{
 	Long: `Reads a harness permission request from stdin, sends it to the daemon,
 and emits the harness-native JSON response on stdout.
 
-Auto-detects the harness format (Claude Code, Codex, Gemini CLI, or Copilot
-CLI) from the payload shape. Override with --harness.
+Auto-detects the harness format (Claude Code, Antigravity, Codex, Gemini CLI,
+or Copilot CLI) from the payload shape. Override with --harness.
 
 If the daemon is unreachable, exits 0 silently (fail-open).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -83,5 +83,5 @@ If the daemon is unreachable, exits 0 silently (fail-open).`,
 
 func init() {
 	rootCmd.AddCommand(hookCmd)
-	hookCmd.Flags().StringVar(&hookHarness, "harness", "", "Harness format override (claude|gemini|codex|copilot)")
+	hookCmd.Flags().StringVar(&hookHarness, "harness", "", "Harness format override (claude|antigravity|agy|gemini|codex|copilot)")
 }

@@ -55,6 +55,18 @@ type CopilotPayload struct {
 	ToolArgs  string `json:"toolArgs,omitempty"`
 }
 
+// AntigravityPayload is an Antigravity (agy) PreToolUse hook payload.
+// Protojson camelCase fields with a nested toolCall object and workspacePaths.
+type AntigravityPayload struct {
+	ToolCall struct {
+		Name string         `json:"name"`
+		Args map[string]any `json:"args"`
+	} `json:"toolCall"`
+	ConversationID string   `json:"conversationId,omitempty"`
+	WorkspacePaths []string `json:"workspacePaths,omitempty"`
+	StepIdx        int      `json:"stepIdx,omitempty"`
+}
+
 // NormalizedRequest is the harness-agnostic tool-use request.
 type NormalizedRequest struct {
 	Tool        string
@@ -108,9 +120,9 @@ func SanitizeHookEvent(event string) string {
 // hook_event_name. Codex always sends one; absence there is a parse error.
 func defaultEventFor(harness string) string {
 	switch harness {
-	case HarnessClaude:
+	case HarnessClaude, HarnessAntigravity, HarnessAgy:
 		return EventPreToolUse
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		return EventBeforeTool
 	case HarnessCopilot:
 		return EventCopilotPreToolUse
@@ -122,17 +134,21 @@ func defaultEventFor(harness string) string {
 // toolInputSummary extracts a one-line summary from a tool_input map.
 // Handles common patterns like {"command": "..."} or {"file_path": "...", "content": "..."}.
 func toolInputSummary(m map[string]any) string {
-	// Bash: {"command": "swift build"}
-	if cmd, ok := m["command"]; ok {
-		if s, ok := cmd.(string); ok {
-			return s
+	// Bash / run_command: {"command": "swift build"} or {"CommandLine": "go test"}
+	for _, k := range []string{"command", "CommandLine"} {
+		if cmd, ok := m[k]; ok {
+			if s, ok := cmd.(string); ok {
+				return s
+			}
 		}
 	}
 
-	// Read/Write: {"file_path": "...", "content": "..."}
-	if fp, ok := m["file_path"]; ok {
-		if s, ok := fp.(string); ok {
-			return s
+	// Read/Write: {"file_path": "..."} or {"Path": "..."} or {"NotebookPath": "..."}
+	for _, k := range []string{"file_path", "Path", "NotebookPath"} {
+		if fp, ok := m[k]; ok {
+			if s, ok := fp.(string); ok {
+				return s
+			}
 		}
 	}
 
@@ -163,6 +179,11 @@ func DetectAndParse(r io.Reader, harnessHint string) (*NormalizedRequest, string
 		return nil, HarnessUnknown, fmt.Errorf("unrecognized payload format: %s", truncate(raw, 200))
 	}
 
+	// Antigravity (agy): protojson camelCase toolCall object.
+	if _, ok := probe["toolCall"]; ok {
+		return parseWithFormat(raw, HarnessAntigravity)
+	}
+
 	// Copilot: camelCase toolName distinguishes it from the snake_case
 	// payloads. No hook_event_name on the wire.
 	if _, ok := probe["toolName"]; ok {
@@ -178,7 +199,7 @@ func DetectAndParse(r io.Reader, harnessHint string) (*NormalizedRequest, string
 		case EventPermissionRequest:
 			return parseWithFormat(raw, HarnessCodex)
 		case EventBeforeTool:
-			return parseWithFormat(raw, HarnessAntigravity)
+			return parseWithFormat(raw, HarnessGemini)
 		case EventPreToolUse:
 			if _, ok := probe["turn_id"]; ok {
 				return parseWithFormat(raw, HarnessCodex)
@@ -203,7 +224,7 @@ func parseWithFormat(raw, harness string) (*NormalizedRequest, string, error) {
 			return nil, harness, fmt.Errorf("claude payload missing tool_name")
 		}
 		return normalizeClaudeCode(p), harness, nil
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		var p GeminiCLIPayload
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			return nil, harness, fmt.Errorf("gemini payload: %w", err)
@@ -212,6 +233,15 @@ func parseWithFormat(raw, harness string) (*NormalizedRequest, string, error) {
 			return nil, harness, fmt.Errorf("gemini payload missing tool_name")
 		}
 		return normalizeGeminiCLI(p), harness, nil
+	case HarnessAntigravity, HarnessAgy:
+		var p AntigravityPayload
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			return nil, harness, fmt.Errorf("antigravity payload: %w", err)
+		}
+		if p.ToolCall.Name == "" {
+			return nil, harness, fmt.Errorf("antigravity payload missing toolCall.name")
+		}
+		return normalizeAntigravity(p), harness, nil
 	case HarnessCodex:
 		var p CodexPayload
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
@@ -266,6 +296,20 @@ func normalizeGeminiCLI(p GeminiCLIPayload) *NormalizedRequest {
 	}
 	if p.Cwd != "" {
 		nr.ProjectPath = p.Cwd
+	} else {
+		nr.ProjectPath = detectProjectDir()
+	}
+	return nr
+}
+
+func normalizeAntigravity(p AntigravityPayload) *NormalizedRequest {
+	nr := &NormalizedRequest{
+		Tool:  p.ToolCall.Name,
+		Input: toolInputSummary(p.ToolCall.Args),
+		Event: defaultEventFor(HarnessAntigravity),
+	}
+	if len(p.WorkspacePaths) > 0 && p.WorkspacePaths[0] != "" {
+		nr.ProjectPath = p.WorkspacePaths[0]
 	} else {
 		nr.ProjectPath = detectProjectDir()
 	}

@@ -255,23 +255,123 @@ func TestInstallAntigravityHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path := filepath.Join(tmpHome, ".gemini", "settings.json")
+	path := filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var cfg geminiSettings
+	var cfg map[string]struct {
+		PreToolUse []struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"PreToolUse"`
+	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
 	}
 
-	if cfg.Hooks == nil || len(cfg.Hooks.BeforeTool) != 1 {
-		t.Fatalf("expected one BeforeTool entry, got %#v", cfg.Hooks)
+	vc, ok := cfg["vibecop"]
+	if !ok || len(vc.PreToolUse) != 1 {
+		t.Fatalf("expected top-level 'vibecop' with 1 PreToolUse entry, got %#v", cfg)
 	}
-	got := cfg.Hooks.BeforeTool[0]
+	got := vc.PreToolUse[0]
+	if got.Matcher != "*" {
+		t.Errorf("expected matcher '*', got %q", got.Matcher)
+	}
 	if len(got.Hooks) != 1 || got.Hooks[0].Type != "command" || got.Hooks[0].Command != "vibecop hook" {
-		t.Errorf("unexpected BeforeTool entry: %#v", got)
+		t.Errorf("unexpected PreToolUse entry: %#v", got)
+	}
+}
+
+func TestInstallAntigravityHooksIdempotentAndCustomPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmpHome := os.Getenv("HOME")
+
+	if err := InstallHooks(HarnessAntigravity, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooks(HarnessAgy, ""); err != nil {
+		t.Fatal(err)
+	}
+	custom := "/opt/vibecop"
+	if err := InstallHooks(HarnessAntigravity, custom); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	vc, ok := raw["vibecop"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing vibecop key: %v", raw)
+	}
+	pre, ok := vc["PreToolUse"].([]any)
+	if !ok || len(pre) != 1 {
+		t.Fatalf("expected 1 PreToolUse entry, got %#v", vc["PreToolUse"])
+	}
+	entry := pre[0].(map[string]any)
+	hooks := entry["hooks"].([]any)
+	first := hooks[0].(map[string]any)
+	if first["command"] != custom+" hook" {
+		t.Errorf("expected command %q, got %v", custom+" hook", first["command"])
+	}
+}
+
+func TestInstallAntigravityPreservesOtherNamedHooks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmpHome := os.Getenv("HOME")
+
+	cfgDir := filepath.Join(tmpHome, ".gemini", "config")
+	os.MkdirAll(cfgDir, 0755)
+	existing := `{
+		"lint-checker": {
+			"PostToolUse": [
+				{
+					"matcher": "run_command",
+					"hooks": [{"type": "command", "command": "./lint.sh"}]
+				}
+			]
+		}
+	}`
+	os.WriteFile(filepath.Join(cfgDir, "hooks.json"), []byte(existing), 0644)
+
+	if err := InstallHooks(HarnessAntigravity, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(cfgDir, "hooks.json"))
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	if _, ok := raw["lint-checker"]; !ok {
+		t.Errorf("lint-checker hook group was dropped: %s", string(data))
+	}
+	if _, ok := raw["vibecop"]; !ok {
+		t.Errorf("vibecop hook group was not added: %s", string(data))
+	}
+
+	if err := UninstallHooks(HarnessAgy); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(filepath.Join(cfgDir, "hooks.json"))
+	raw = map[string]any{}
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["lint-checker"]; !ok {
+		t.Errorf("lint-checker hook group was dropped on uninstall: %s", string(data))
+	}
+	if _, ok := raw["vibecop"]; ok {
+		t.Errorf("vibecop hook group was not removed on uninstall: %s", string(data))
 	}
 }
 
@@ -284,17 +384,13 @@ func TestUninstallAgyHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path := filepath.Join(tmpHome, ".gemini", "settings.json")
+	path := filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
 	data, _ := os.ReadFile(path)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	if _, ok := raw["hooks"]; ok {
-		var cfg geminiSettings
-		json.Unmarshal(data, &cfg)
-		if cfg.Hooks != nil && len(cfg.Hooks.BeforeTool) > 0 {
-			t.Error("expected empty BeforeTool after uninstall")
-		}
+	if _, ok := raw["vibecop"]; ok {
+		t.Errorf("expected vibecop entry removed after uninstall, got %#v", raw)
 	}
 }
 
