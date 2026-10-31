@@ -21,3 +21,25 @@ func TestFirstRunSkipList(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallAllIncludesGeminiAndAntigravity(t *testing.T) {
+	origAll := installAll
+	origHarness := installHarness
+	t.Cleanup(func() {
+		installAll = origAll
+		installHarness = origHarness
+	})
+	installHarness = ""
+	installAll = true
+
+	targets := resolveInstallTargets()
+	seen := make(map[string]bool)
+	for _, h := range targets {
+		seen[h] = true
+	}
+	for _, want := range []string{"claude", "antigravity", "gemini", "codex", "copilot"} {
+		if !seen[want] {
+			t.Errorf("install --all targets %v missing %q", targets, want)
+		}
+	}
+}

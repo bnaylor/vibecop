@@ -75,15 +75,15 @@ var agentInvocations = map[string]agentInvocation{
 		binaries: []string{"gemini"},
 		args:     func(p string) []string { return []string{"-p", p} },
 	},
-	// Antigravity installs under either name depending on how it was
-	// fetched; both keys resolve to the same CLI, preferring their own
-	// spelling.
+	// Antigravity installs under antigravity, agy, or jetski depending on how
+	// it was fetched; both keys resolve to the same CLI, preferring their own
+	// spelling first.
 	HarnessAntigravity: {
-		binaries: []string{"antigravity", "agy"},
+		binaries: []string{"antigravity", "agy", "jetski"},
 		args:     func(p string) []string { return []string{"-p", p} },
 	},
 	HarnessAgy: {
-		binaries: []string{"agy", "antigravity"},
+		binaries: []string{"agy", "antigravity", "jetski"},
 		args:     func(p string) []string { return []string{"-p", p} },
 	},
 	// codex/copilot use each vendor's documented headless invocation but

@@ -106,14 +106,14 @@ vibecop init               Initialize Guardian mode for the current project
   --harness  claude|codex|gemini|copilot|antigravity|agy   Agent to use for prompt generation (required)
   --dry-run                           Print generated prompt without saving
 vibecop install            Install hook scripts into the coding harness configs
-  --harness  claude|codex|gemini|copilot   Harness to install into (required or --all)
-  --all                               Install into all detected harnesses
+  --harness  claude|antigravity|agy|gemini|codex|copilot   Harness to install into (required or --all)
+  --all                               Install into all supported harnesses
 vibecop uninstall          Remove installed hook scripts
-  --harness  claude|codex|gemini|copilot
+  --harness  claude|antigravity|agy|gemini|codex|copilot
 vibecop hook               Hook entry point (called by installed scripts, reads stdin)
 vibecop test               Send a probe request to the configured endpoint
 vibecop refine             Regenerate the Guardian prompt for the current project
-  --harness  claude|codex|gemini|copilot
+  --harness  claude|codex|gemini|copilot|antigravity|agy
 ```
 
 ## Core Architecture
@@ -219,6 +219,20 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 }
 ```
 
+**Antigravity (`agy`)** (`~/.gemini/config/hooks.json` — top-level named hook group `vibecop` mapping to `PreToolUse`):
+```json
+{
+  "vibecop": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "vibecop hook" }]
+      }
+    ]
+  }
+}
+```
+
 **Copilot CLI** (`~/.copilot/settings.json` — flat array of hook definitions, command lives under `bash`):
 ```json
 {
@@ -231,7 +245,7 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 }
 ```
 
-`vibecop hook` reads the harness's JSON payload from stdin, normalizes it to the IPC request format, sends it to the daemon socket, and emits the harness-native JSON response on stdout. The harness is auto-detected from the input payload shape; it can also be overridden with `--harness {claude|gemini|codex|copilot}`.
+`vibecop hook` reads the harness's JSON payload from stdin, normalizes it to the IPC request format, sends it to the daemon socket, and emits the harness-native JSON response on stdout. The harness is auto-detected from the input payload shape; it can also be overridden with `--harness {claude|antigravity|agy|gemini|codex|copilot}`.
 
 ### Verdict → harness response contract
 
@@ -241,9 +255,9 @@ After subscribing, the daemon streams newline-terminated event objects to the TU
 |------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `approve`  | Emit harness-native "allow" JSON. Skips the harness's user prompt.                                                                                       |
 | `deny`     | Emit harness-native "deny" JSON. Tool is blocked. Stderr `VibeCop [DENY]: <reason>` is preserved for operator visibility.                                |
-| `escalate` | Emit no JSON. The harness's normal permission flow runs (typically prompts the user). Stderr `VibeCop [ESCALATE]: <reason>` is preserved when reason is non-empty. |
+| `escalate` | Emit harness-native "ask" JSON where required (`antigravity` / `agy`), or no JSON so the harness's normal permission flow runs. Stderr `VibeCop [ESCALATE]: <reason>` is preserved when reason is non-empty. |
 
-`escalate` deliberately does not map to a harness's "ask" decision: vibecop's preference is "no objection, defer to whatever the harness would have done" rather than forcing a prompt the harness might otherwise have skipped under a user-defined rule.
+`escalate` deliberately does not map to a harness's "ask" decision on harnesses where empty stdout defers to the normal permission flow; on `antigravity` / `agy` (`PreToolUse`), `{"decision":"ask","reason":"…"}` is required on stdout and respects the user's "Always Allow" cache.
 
 #### Per-harness JSON shapes
 
@@ -255,6 +269,7 @@ Reason fields are omitted when the daemon's reason is empty.
 | `codex`, `PreToolUse`        | (no stdout — Codex `PreToolUse` cannot allow; `PermissionRequest` is the approval channel)                             | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`           |
 | `codex`, `PermissionRequest` | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`                         | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"…"}}}`                  |
 | `gemini`, `BeforeTool`       | `{"decision":"allow","reason":"…"}`                                                                                    | `{"decision":"deny","reason":"…"}`                                                                                           |
+| `antigravity`, `PreToolUse`  | `{"decision":"allow","reason":"…"}`                                                                                    | `{"decision":"deny","reason":"…"}` (`escalate` emits `{"decision":"ask","reason":"…"}`)                                      |
 | `copilot`, `preToolUse`      | `{"permissionDecision":"allow"}`                                                                                       | `{"permissionDecision":"deny","permissionDecisionReason":"…"}`                                                               |
 
 ### Harness limitations
@@ -436,8 +451,8 @@ ESCALATE (surface to the human — they may have asked for exactly this):
 - Any operation you cannot categorize confidently
 - Commands that modify shell startup files (.bashrc, .zshrc, .profile, etc.)
 - Writes to agent or tool configuration under the home directory
-  (~/.claude/, ~/.codex/, ~/.config/, ~/.gitconfig, and similar), including
-  installing hooks or session scripts
+  (~/.claude/, ~/.codex/, ~/.gemini/, ~/.config/, ~/.gitconfig, and similar),
+  including installing hooks or session scripts
 - Package installs that add globally visible binaries outside a known package
   manager workflow
 - Killing or signalling processes (kill, pkill, skill) that were not started

@@ -131,25 +131,45 @@ func TestWriteVerdict(t *testing.T) {
 			wantStdout: `{"decision":"allow"}`,
 		},
 
-		// --- Antigravity BeforeTool ---
+		// --- Antigravity PreToolUse ---
 		{
-			name:    "antigravity BeforeTool approve",
-			harness: HarnessAntigravity, event: EventBeforeTool,
+			name:    "antigravity PreToolUse approve",
+			harness: HarnessAntigravity, event: EventPreToolUse,
 			verdict:    daemon.Verdict{Verdict: "approve", Reason: "ok"},
 			wantStdout: `{"decision":"allow","reason":"ok"}`,
 		},
 		{
-			name:    "antigravity BeforeTool approve no reason",
-			harness: HarnessAntigravity, event: EventBeforeTool,
+			name:    "antigravity PreToolUse approve no reason",
+			harness: HarnessAntigravity, event: EventPreToolUse,
 			verdict:    daemon.Verdict{Verdict: "approve"},
 			wantStdout: `{"decision":"allow"}`,
 		},
 		{
-			name:    "antigravity BeforeTool deny",
-			harness: HarnessAntigravity, event: EventBeforeTool,
+			name:    "antigravity PreToolUse deny",
+			harness: HarnessAntigravity, event: EventPreToolUse,
 			verdict:    daemon.Verdict{Verdict: "deny", Reason: "blocked"},
 			wantStdout: `{"decision":"deny","reason":"blocked"}`,
 			wantStderr: "VibeCop [DENY]: blocked\n",
+		},
+		{
+			name:    "antigravity PreToolUse escalate emits ask JSON",
+			harness: HarnessAntigravity, event: EventPreToolUse,
+			verdict:    daemon.Verdict{Verdict: "escalate", Reason: "uncertain"},
+			wantStdout: `{"decision":"ask","reason":"uncertain"}`,
+			wantStderr: "VibeCop [ESCALATE]: uncertain\n",
+		},
+		{
+			name:    "antigravity PreToolUse escalate no reason emits ask JSON",
+			harness: HarnessAntigravity, event: EventPreToolUse,
+			verdict:    daemon.Verdict{Verdict: "escalate"},
+			wantStdout: `{"decision":"ask"}`,
+		},
+		{
+			name:    "agy PreToolUse escalate emits ask JSON",
+			harness: HarnessAgy, event: EventPreToolUse,
+			verdict:    daemon.Verdict{Verdict: "escalate", Reason: "confirm"},
+			wantStdout: `{"decision":"ask","reason":"confirm"}`,
+			wantStderr: "VibeCop [ESCALATE]: confirm\n",
 		},
 		{
 			name:    "antigravity empty event defaults",

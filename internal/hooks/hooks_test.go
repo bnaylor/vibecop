@@ -84,8 +84,8 @@ func TestDetectGeminiCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if harness != HarnessAntigravity {
-		t.Errorf("expected antigravity harness, got %s", harness)
+	if harness != HarnessGemini {
+		t.Errorf("expected gemini harness, got %s", harness)
 	}
 	if nr.Tool != "Bash" {
 		t.Errorf("expected tool Bash, got %s", nr.Tool)
@@ -98,6 +98,61 @@ func TestDetectGeminiCLI(t *testing.T) {
 	}
 	if nr.Event != EventBeforeTool {
 		t.Errorf("expected event BeforeTool, got %s", nr.Event)
+	}
+}
+
+func TestDetectAntigravity(t *testing.T) {
+	input := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": { "CommandLine": "go test ./..." }
+		},
+		"stepIdx": 19,
+		"conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+		"workspacePaths": ["/Users/test/src/my-project"]
+	}`
+
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessAntigravity {
+		t.Errorf("expected antigravity harness, got %s", harness)
+	}
+	if nr.Tool != "run_command" {
+		t.Errorf("expected tool run_command, got %s", nr.Tool)
+	}
+	if nr.Input != "go test ./..." {
+		t.Errorf("expected input 'go test ./...', got %s", nr.Input)
+	}
+	if nr.ProjectPath != "/Users/test/src/my-project" {
+		t.Errorf("expected /Users/test/src/my-project, got %s", nr.ProjectPath)
+	}
+	if nr.Event != EventPreToolUse {
+		t.Errorf("expected event PreToolUse, got %s", nr.Event)
+	}
+}
+
+func TestDetectAntigravityReadFile(t *testing.T) {
+	input := `{
+		"toolCall": {
+			"name": "read_file",
+			"args": { "Path": "/Users/test/main.go" }
+		}
+	}`
+
+	nr, harness, err := DetectAndParse(strings.NewReader(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if harness != HarnessAntigravity {
+		t.Errorf("expected antigravity harness, got %s", harness)
+	}
+	if nr.Tool != "read_file" {
+		t.Errorf("expected tool read_file, got %s", nr.Tool)
+	}
+	if nr.Input != "/Users/test/main.go" {
+		t.Errorf("expected input '/Users/test/main.go', got %s", nr.Input)
 	}
 }
 
@@ -114,13 +169,23 @@ func TestDetectWithHint(t *testing.T) {
 		t.Errorf("hint should force claude, got %s", harness)
 	}
 
-	// Hint forcing antigravity
-	_, harness, err = DetectAndParse(strings.NewReader(input), HarnessAntigravity)
+	// Hint forcing antigravity on an Antigravity payload
+	agyInput := `{ "toolCall": { "name": "run_command", "args": { "CommandLine": "echo hi" } } }`
+	_, harness, err = DetectAndParse(strings.NewReader(agyInput), HarnessAntigravity)
 	if err != nil {
 		t.Fatalf("hint parse failed: %v", err)
 	}
 	if harness != HarnessAntigravity {
 		t.Errorf("hint should force antigravity, got %s", harness)
+	}
+
+	// Hint forcing agy on an Antigravity payload
+	_, harness, err = DetectAndParse(strings.NewReader(agyInput), HarnessAgy)
+	if err != nil {
+		t.Fatalf("hint parse failed: %v", err)
+	}
+	if harness != HarnessAgy {
+		t.Errorf("hint should force agy, got %s", harness)
 	}
 }
 
@@ -276,8 +341,8 @@ func TestDetectGeminiSetsBeforeToolEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if harness != HarnessAntigravity {
-		t.Errorf("expected antigravity, got %s", harness)
+	if harness != HarnessGemini {
+		t.Errorf("expected gemini, got %s", harness)
 	}
 	if nr.Event != EventBeforeTool {
 		t.Errorf("expected default BeforeTool, got %s", nr.Event)

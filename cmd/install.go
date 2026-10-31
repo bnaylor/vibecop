@@ -19,8 +19,8 @@ var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install hook scripts into coding harness configs",
 	Long: `Install vibecop hook scripts into the specified harness.
-Use --harness to target one (claude, gemini, codex, copilot) or --all for all
-supported harnesses.
+Use --harness to target one (claude, antigravity, agy, gemini, codex, copilot)
+or --all for all supported harnesses.
 
 By default the hook calls "vibecop hook" and relies on $PATH to find it. Pass
 --vibecop-path to point the hook at a specific binary instead — useful when
@@ -83,6 +83,7 @@ func resolveInstallTargets() []string {
 		return []string{
 			hooks.HarnessClaude,
 			hooks.HarnessAntigravity,
+			hooks.HarnessGemini,
 			hooks.HarnessCodex,
 			hooks.HarnessCopilot,
 		}

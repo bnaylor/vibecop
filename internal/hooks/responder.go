@@ -22,7 +22,7 @@ func WriteVerdict(harness, event string, v daemon.Verdict, stdout, stderr io.Wri
 	case "deny":
 		return writeDeny(harness, event, v.Reason, stdout, stderr)
 	case "escalate":
-		return writeEscalate(harness, event, v.Reason, stderr)
+		return writeEscalate(harness, event, v.Reason, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "VibeCop: unknown verdict=%q, falling open\n", v.Verdict)
 		return 0
@@ -34,13 +34,16 @@ func WriteVerdict(harness, event string, v daemon.Verdict, stdout, stderr io.Wri
 // path uses. Without this gate, the daemon's reason text (which can quote
 // the agent's command line back at us) leaks to stderr even when we don't
 // know what harness sent the request.
-func writeEscalate(harness, event, reason string, stderr io.Writer) int {
+func writeEscalate(harness, event, reason string, stdout, stderr io.Writer) int {
 	if !recognizedCombo(harness, event) {
 		fmt.Fprintf(stderr, "VibeCop: unrecognized harness=%q event=%q, falling open\n", harness, event)
 		return 0
 	}
 	if reason != "" {
 		fmt.Fprintf(stderr, "VibeCop [ESCALATE]: %s\n", reason)
+	}
+	if payload := escalateJSON(harness, event, reason); payload != nil {
+		_, _ = stdout.Write(payload)
 	}
 	return 0
 }
@@ -51,11 +54,11 @@ func writeEscalate(harness, event, reason string, stderr io.Writer) int {
 // reason text.
 func recognizedCombo(harness, event string) bool {
 	switch harness {
-	case HarnessClaude:
+	case HarnessClaude, HarnessAntigravity, HarnessAgy:
 		return event == "" || event == EventPreToolUse
 	case HarnessCodex:
 		return event == EventPreToolUse || event == EventPermissionRequest
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		return event == "" || event == EventBeforeTool
 	case HarnessCopilot:
 		return event == "" || event == EventCopilotPreToolUse
@@ -111,8 +114,12 @@ func approveJSON(harness, event, reason string) ([]byte, bool) {
 		case EventPermissionRequest:
 			return marshalSafe(codexPermReqAllow()), true
 		}
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		if event == "" || event == EventBeforeTool {
+			return marshalSafe(geminiDecision("allow", reason)), true
+		}
+	case HarnessAntigravity, HarnessAgy:
+		if event == "" || event == EventPreToolUse {
 			return marshalSafe(geminiDecision("allow", reason)), true
 		}
 	case HarnessCopilot:
@@ -138,8 +145,12 @@ func denyJSON(harness, event, reason string) ([]byte, bool) {
 		case EventPermissionRequest:
 			return marshalSafe(codexPermReqDeny(reason)), true
 		}
-	case HarnessGemini, HarnessAntigravity, HarnessAgy:
+	case HarnessGemini:
 		if event == "" || event == EventBeforeTool {
+			return marshalSafe(geminiDecision("deny", reason)), true
+		}
+	case HarnessAntigravity, HarnessAgy:
+		if event == "" || event == EventPreToolUse {
 			return marshalSafe(geminiDecision("deny", reason)), true
 		}
 	case HarnessCopilot:
@@ -148,6 +159,16 @@ func denyJSON(harness, event, reason string) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+func escalateJSON(harness, event, reason string) []byte {
+	switch harness {
+	case HarnessAntigravity, HarnessAgy:
+		if event == "" || event == EventPreToolUse {
+			return marshalSafe(geminiDecision("ask", reason))
+		}
+	}
+	return nil
 }
 
 // marshalSafe is json.Marshal that returns nil on encoder error so the

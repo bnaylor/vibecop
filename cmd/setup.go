@@ -61,11 +61,11 @@ func postSetup(configPath, vibecopPath string) {
 	fmt.Fprintln(os.Stderr)
 
 	// Offer to install hooks.
-	if confirm("Install hooks into Claude Code and Antigravity (shared with Gemini CLI)?") {
+	if confirm("Install hooks into Claude Code, Antigravity, and Gemini CLI?") {
 		if vibecopPath != "" {
 			fmt.Fprintf(os.Stderr, "  using vibecop binary: %s\n", vibecopPath)
 		}
-		for _, h := range []string{hooks.HarnessClaude, hooks.HarnessAntigravity} {
+		for _, h := range []string{hooks.HarnessClaude, hooks.HarnessAntigravity, hooks.HarnessGemini} {
 			if err := hooks.InstallHooks(h, vibecopPath); err != nil {
 				fmt.Fprintf(os.Stderr, "  %s: %v\n", h, err)
 			} else {

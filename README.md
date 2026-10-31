@@ -37,6 +37,7 @@ The hook is a one-liner installed into your harness config. The daemon runs in t
 ## Supported harnesses
 
 - Claude Code (Anthropic)
+- Antigravity / `agy` (Google)
 - Gemini CLI (Google)
 - Codex CLI (OpenAI)
 - Copilot CLI (GitHub)
